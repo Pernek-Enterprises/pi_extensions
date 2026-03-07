@@ -34,6 +34,10 @@ type RepoContext = {
 	testFileExamples: Array<{ path: string; preview: string }>;
 	testDirectories: string[];
 	testNamingPatterns: string[];
+	testConfigDirectories: string[];
+	testConfigPatterns: string[];
+	testScriptDirectories: string[];
+	testScriptPatterns: string[];
 	sourceDirectories: string[];
 	hasTestingLibrary: boolean;
 	hasPlaywright: boolean;
@@ -133,6 +137,10 @@ function detectFramework(pkg: Record<string, any> | null): TestFramework {
 	};
 	if (deps.vitest) return "vitest";
 	if (deps.jest || deps["ts-jest"] || deps["@types/jest"]) return "jest";
+
+	const testScripts = getTestScriptEntries(pkg.scripts).map(([, script]) => script).join("\n");
+	if (/\bvitest\b/.test(testScripts)) return "vitest";
+	if (/\bjest\b/.test(testScripts)) return "jest";
 	return "unknown";
 }
 
@@ -369,10 +377,59 @@ function uniq<T>(items: T[]): T[] {
 	return [...new Set(items)];
 }
 
+function getConfigTestEntries(files: string[]): string[] {
+	return files.filter((file) => {
+		const name = path.basename(file);
+		return /^(?:vitest|vite|jest|playwright|mocha)(?:\.workspace)?\.config\.(?:[cm]?[jt]s|mjs|cjs|mts|cts)$/.test(name);
+	});
+}
+
+function inferTestDirectoriesFromText(texts: string[]): string[] {
+	const dirs: string[] = [];
+	for (const text of texts) {
+		for (const match of text.matchAll(/(?:^|[\s"'`[(,])((?:__tests__|tests|test|src)(?:\/[A-Za-z0-9._*:-]+)*)?(?=\/|$|[\s"'`),\]])/g)) {
+			let candidate = match[1]?.replace(/\/$/, "") ?? "";
+			candidate = candidate.replace(/\/\*\*?(?:\/.*)?$/, "");
+			if (!candidate) continue;
+			if (/[{*]/.test(path.basename(candidate))) {
+				dirs.push(path.dirname(candidate));
+			} else if (/\.(?:[cm]?[jt]sx?|mjs|cjs|mts|cts)$/.test(candidate)) {
+				dirs.push(path.dirname(candidate));
+			} else {
+				dirs.push(candidate);
+			}
+		}
+	}
+	return uniq(dirs.filter((dir) => dir && dir !== "."));
+}
+
+function inferTestPatternsFromText(texts: string[]): string[] {
+	const patterns: string[] = [];
+	for (const text of texts) {
+		for (const match of text.matchAll(/\.(spec|specs|test|tests)\.(tsx?|jsx?|mjs|cjs|mts|cts|js)/g)) {
+			patterns.push(`.${match[1]}.${match[2]}`);
+		}
+		if (/\bnode\s+--test\b/.test(text)) patterns.push(".test.ts");
+	}
+	return uniq(patterns);
+}
+
+function getTestScriptEntries(scripts: Record<string, string> | undefined): Array<[string, string]> {
+	return Object.entries(scripts ?? {}).filter(([name]) => name === "test" || name.startsWith("test:"));
+}
+
+function inferScriptTestDirectories(scriptEntries: Array<[string, string]>): string[] {
+	return inferTestDirectoriesFromText(scriptEntries.map(([, script]) => script));
+}
+
+function inferScriptTestPatterns(scriptEntries: Array<[string, string]>): string[] {
+	return inferTestPatternsFromText(scriptEntries.map(([, script]) => script));
+}
+
 async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, framework: TestFramework): Promise<RepoContext> {
 	const files = await listFiles(rootDir, 4);
 	const rel = (p: string) => path.relative(rootDir, p);
-	const testFiles = files.filter((file) => /\.(spec|test)\.(ts|tsx)$/.test(file));
+	const testFiles = files.filter((file) => /\.(spec|specs|test|tests)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(file));
 	const examples = await Promise.all(
 		testFiles.slice(0, 6).map(async (file) => {
 			const content = await fs.readFile(file, "utf8").catch(() => "");
@@ -383,20 +440,42 @@ async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, fra
 		}),
 	);
 
+	const supportedPatterns = [
+		".tests.mjs",
+		".test.mjs",
+		".tests.cjs",
+		".test.cjs",
+		".tests.js",
+		".test.js",
+		".tests.jsx",
+		".test.jsx",
+		".tests.tsx",
+		".test.tsx",
+		".spec.tsx",
+		".tests.ts",
+		".test.ts",
+		".spec.ts",
+		".tests.js",
+		".test.js",
+		".spec.js",
+		".tests.mts",
+		".test.mts",
+		".spec.mts",
+		".tests.cts",
+		".test.cts",
+		".spec.cts",
+	];
 	const namingPatterns = uniq(
 		testFiles.map((file) => {
 			const name = path.basename(file);
-			if (name.endsWith(".spec.tsx")) return ".spec.tsx";
-			if (name.endsWith(".test.tsx")) return ".test.tsx";
-			if (name.endsWith(".spec.ts")) return ".spec.ts";
-			return ".test.ts";
+			return supportedPatterns.find((pattern) => name.endsWith(pattern)) ?? ".test.ts";
 		}),
 	);
 
 	const testDirs = uniq(testFiles.map((file) => path.dirname(rel(file)))).slice(0, 12);
 	const sourceDirs = uniq(
 		files
-			.filter((file) => /\.(ts|tsx)$/.test(file) && !/\.(spec|test)\.(ts|tsx)$/.test(file))
+			.filter((file) => /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(file) && !/\.(spec|specs|test|tests)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(file))
 			.map((file) => rel(file).split(path.sep)[0])
 			.filter(Boolean),
 	).slice(0, 12);
@@ -405,6 +484,13 @@ async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, fra
 		...(pkg?.dependencies ?? {}),
 		...(pkg?.devDependencies ?? {}),
 	};
+	const configFiles = getConfigTestEntries(files);
+	const configContents = await Promise.all(configFiles.map((file) => fs.readFile(file, "utf8").catch(() => "")));
+	const configTestDirectories = inferTestDirectoriesFromText(configContents);
+	const configTestPatterns = inferTestPatternsFromText(configContents);
+	const scriptEntries = getTestScriptEntries(pkg?.scripts);
+	const scriptTestDirectories = inferScriptTestDirectories(scriptEntries);
+	const scriptTestPatterns = inferScriptTestPatterns(scriptEntries);
 
 	return {
 		framework,
@@ -412,6 +498,10 @@ async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, fra
 		testFileExamples: examples,
 		testDirectories: testDirs,
 		testNamingPatterns: namingPatterns,
+		testConfigDirectories: configTestDirectories,
+		testConfigPatterns: configTestPatterns,
+		testScriptDirectories: scriptTestDirectories,
+		testScriptPatterns: scriptTestPatterns,
 		sourceDirectories: sourceDirs,
 		hasTestingLibrary: Boolean(deps["@testing-library/react"] || deps["@testing-library/jest-dom"]),
 		hasPlaywright: Boolean(deps["playwright"] || deps["@playwright/test"]),
@@ -449,6 +539,10 @@ async function generateWithModel(
 			framework,
 			testDirectories: repoContext.testDirectories,
 			testNamingPatterns: repoContext.testNamingPatterns,
+			testConfigDirectories: repoContext.testConfigDirectories,
+			testConfigPatterns: repoContext.testConfigPatterns,
+			testScriptDirectories: repoContext.testScriptDirectories,
+			testScriptPatterns: repoContext.testScriptPatterns,
 			sourceDirectories: repoContext.sourceDirectories,
 			hasTestingLibrary: repoContext.hasTestingLibrary,
 			hasPlaywright: repoContext.hasPlaywright,
@@ -505,17 +599,69 @@ async function ensureDir(filePath: string): Promise<void> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 }
 
-function pickDefaultOutputPath(rootDir: string, planPath: string, repoContext: RepoContext, suggested?: string): string {
-	if (suggested) return path.resolve(rootDir, suggested);
+function isGenericSuggestedOutput(suggested?: string): boolean {
+	if (!suggested) return true;
+	const normalized = suggested.replace(/\\/g, "/");
+	return /(^|\/)tests\/generated(?:\/|$)/.test(normalized);
+}
+
+function isPathInsideRoot(rootDir: string, filePath: string): boolean {
+	const relative = path.relative(rootDir, filePath);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function normalizeSuggestedOutputPath(rootDir: string, suggested?: string): string | null {
+	if (!suggested?.trim()) return null;
+	const resolved = path.resolve(rootDir, suggested.trim());
+	if (!isPathInsideRoot(rootDir, resolved)) return null;
+	if (!/\.(?:[cm]?[jt]sx?|mjs|cjs|mts|cts)$/i.test(resolved)) return null;
+	return resolved;
+}
+
+function choosePreferredTestPattern(repoContext: RepoContext): string {
+	const preferredConfigPattern = repoContext.testConfigPatterns[0];
+	if (preferredConfigPattern) return preferredConfigPattern;
+	const preferredScriptPattern = repoContext.testScriptPatterns[0];
+	if (preferredScriptPattern) return preferredScriptPattern;
+	const preferredNamedPattern = repoContext.testNamingPatterns[0];
+	if (preferredNamedPattern) return preferredNamedPattern;
+	return repoContext.framework === "jest" ? ".test.ts" : ".spec.ts";
+}
+
+function choosePreferredTestDirectory(repoContext: RepoContext): string {
+	const candidates = [
+		...repoContext.testConfigDirectories,
+		...repoContext.testScriptDirectories,
+		...repoContext.testDirectories,
+	];
+
+	for (const dir of candidates) {
+		if (dir === "__tests__" || dir.endsWith("/__tests__")) return dir;
+	}
+	for (const dir of candidates) {
+		if (dir === "tests" || dir.startsWith("tests/")) return dir;
+	}
+	for (const dir of candidates) {
+		if (dir === "test" || dir.startsWith("test/")) return dir;
+	}
+	for (const dir of candidates) {
+		if (dir === "src" || dir.startsWith("src/")) return dir;
+	}
+	if (repoContext.hasReact && repoContext.sourceDirectories.includes("src")) return "src";
+	return repoContext.testConfigDirectories[0] ?? repoContext.testScriptDirectories[0] ?? repoContext.testDirectories[0] ?? "tests";
+}
+
+function buildDiscoveryAwareOutputPath(rootDir: string, planPath: string, repoContext: RepoContext): string {
 	const slug = slugify(path.basename(planPath));
-	const preferredDir =
-		repoContext.testDirectories.find((dir) => dir === "tests" || dir.startsWith("tests/")) ??
-		repoContext.testDirectories[0] ??
-		"tests/generated";
-	const preferredPattern =
-		repoContext.testNamingPatterns.find((pattern) => pattern === ".spec.ts" || pattern === ".test.ts") ??
-		(repoContext.framework === "jest" ? ".test.ts" : ".spec.ts");
+	const preferredDir = choosePreferredTestDirectory(repoContext);
+	const preferredPattern = choosePreferredTestPattern(repoContext);
 	return path.join(rootDir, preferredDir, `${slug}.plan${preferredPattern}`);
+}
+
+function pickDefaultOutputPath(rootDir: string, planPath: string, repoContext: RepoContext, suggested?: string): string {
+	const normalizedSuggested = normalizeSuggestedOutputPath(rootDir, suggested);
+	if (normalizedSuggested && !isGenericSuggestedOutput(normalizedSuggested)) return normalizedSuggested;
+	return buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext);
 }
 
 async function writeJson(filePath: string, data: unknown): Promise<void> {
@@ -558,6 +704,21 @@ async function runWithLoader<T>(
 
 	return result ?? { cancelled: true };
 }
+
+export const __testables = {
+	detectFramework,
+	getConfigTestEntries,
+	inferTestDirectoriesFromText,
+	inferTestPatternsFromText,
+	inferScriptTestDirectories,
+	inferScriptTestPatterns,
+	isGenericSuggestedOutput,
+	normalizeSuggestedOutputPath,
+	choosePreferredTestPattern,
+	choosePreferredTestDirectory,
+	buildDiscoveryAwareOutputPath,
+	pickDefaultOutputPath,
+};
 
 export default function tddPlanExtension(pi: ExtensionAPI) {
 	pi.registerCommand("tdd-plan", {
@@ -608,7 +769,7 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				return;
 			}
 			const repoContext = repoScan.result;
-			const suggestedOutput = path.join("tests", "generated", `${slugify(path.basename(planPath))}.plan.spec.ts`);
+			const suggestedOutput = buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext);
 
 			if (!ctx.model) {
 				ctx.ui.notify("No active model selected. Select a model first, then run /tdd-plan again.", "error");
@@ -675,6 +836,10 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				repoContext: {
 					testDirectories: repoContext.testDirectories,
 					testNamingPatterns: repoContext.testNamingPatterns,
+					testConfigDirectories: repoContext.testConfigDirectories,
+					testConfigPatterns: repoContext.testConfigPatterns,
+					testScriptDirectories: repoContext.testScriptDirectories,
+					testScriptPatterns: repoContext.testScriptPatterns,
 					sourceDirectories: repoContext.sourceDirectories,
 					hasTestingLibrary: repoContext.hasTestingLibrary,
 					hasPlaywright: repoContext.hasPlaywright,
