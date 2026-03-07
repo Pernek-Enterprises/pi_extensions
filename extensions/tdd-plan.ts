@@ -1,13 +1,31 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { BorderedLoader, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 type TestFramework = "vitest" | "jest" | "unknown";
 
 type Requirement = {
 	text: string;
 	heading?: string;
+};
+
+type MarkdownSection = {
+	index: number;
+	heading?: string;
+	content: string;
+	priority: number;
+};
+
+type PromptRequirements = {
+	text: string;
+	omittedCount: number;
+};
+
+type PromptPlan = {
+	text: string;
+	truncated: boolean;
+	omittedSectionCount: number;
 };
 
 type RepoContext = {
@@ -58,6 +76,10 @@ Rules:
 - Favor the strongest realistic acceptance criteria you can infer from the plan and repository context.
 - If a requirement is vague, still create the best failing acceptance test you can, and list it in ambiguousRequirements.
 - Return raw JSON only. No markdown fences.`;
+
+const MAX_PLAN_CHARS = 24_000;
+const MAX_REQUIREMENTS_IN_PROMPT = 80;
+const SECTION_SUMMARY_MAX_CHARS = 1_200;
 
 function stripCodeFences(text: string): string {
 	const match = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -123,6 +145,17 @@ function slugify(input: string): string {
 		.slice(0, 60) || "plan";
 }
 
+function getSectionPriority(heading?: string): number {
+	if (!heading) return 0;
+	const normalized = heading.toLowerCase();
+	if (/acceptance|success criteria|definition of done/.test(normalized)) return 6;
+	if (/edge cases?|failure|errors?|risks?|constraints?|non-goals?/.test(normalized)) return 5;
+	if (/tests?|test cases?|scenarios?|validation|qa/.test(normalized)) return 4;
+	if (/requirements?|behavior|expected|outcomes?/.test(normalized)) return 3;
+	if (/implementation|approach|design|architecture/.test(normalized)) return 1;
+	return 2;
+}
+
 function extractRequirements(markdown: string): Requirement[] {
 	const lines = markdown.split(/\r?\n/);
 	const requirements: Requirement[] = [];
@@ -156,6 +189,153 @@ function extractRequirements(markdown: string): Requirement[] {
 	}
 
 	return requirements;
+}
+
+function splitMarkdownSections(markdown: string): MarkdownSection[] {
+	const lines = markdown.split(/\r?\n/);
+	const sections: Array<{ heading?: string; lines: string[] }> = [];
+	let current: { heading?: string; lines: string[] } = { lines: [] };
+	let inCode = false;
+
+	const pushCurrent = () => {
+		const content = current.lines.join("\n").trim();
+		if (content) sections.push({ heading: current.heading, lines: current.lines.slice() });
+	};
+
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("```")) inCode = !inCode;
+		const headingMatch = !inCode ? trimmed.match(/^#{1,6}\s+(.+)$/) : null;
+		if (headingMatch) {
+			pushCurrent();
+			current = { heading: headingMatch[1].trim(), lines: [line] };
+			continue;
+		}
+		current.lines.push(line);
+	}
+	pushCurrent();
+
+	if (sections.length <= 1) {
+		const paragraphs = markdown
+			.split(/\n\s*\n+/)
+			.map((chunk) => chunk.trim())
+			.filter(Boolean)
+			.map((content) => ({ heading: undefined, lines: content.split(/\r?\n/) }));
+		if (paragraphs.length > 1) {
+			return paragraphs.map((section, index) => ({
+				index,
+				heading: section.heading,
+				content: section.lines.join("\n").trim(),
+				priority: getSectionPriority(section.heading),
+			}));
+		}
+	}
+
+	return sections.map((section, index) => ({
+		index,
+		heading: section.heading,
+		content: section.lines.join("\n").trim(),
+		priority: getSectionPriority(section.heading),
+	}));
+}
+
+function buildPromptRequirements(requirements: Requirement[]): PromptRequirements {
+	if (requirements.length <= MAX_REQUIREMENTS_IN_PROMPT) {
+		return {
+			text: requirements.map((req, i) => `- ${i + 1}. ${req.heading ? `[${req.heading}] ` : ""}${req.text}`).join("\n"),
+			omittedCount: 0,
+		};
+	}
+
+	const ranked = requirements.map((req, index) => {
+		const headingPriority = getSectionPriority(req.heading);
+		const tailBonus = index >= Math.floor(requirements.length * 0.75) ? 2 : index >= Math.floor(requirements.length * 0.5) ? 1 : 0;
+		return { req, index, score: headingPriority * 10 + tailBonus };
+	});
+
+	const selectedIndexes = new Set(
+		ranked
+			.sort((a, b) => b.score - a.score || a.index - b.index)
+			.slice(0, MAX_REQUIREMENTS_IN_PROMPT)
+			.map((item) => item.index),
+	);
+
+	const selected = requirements
+		.map((req, index) => ({ req, index }))
+		.filter((item) => selectedIndexes.has(item.index));
+
+	return {
+		text: selected.map((item) => `- ${item.index + 1}. ${item.req.heading ? `[${item.req.heading}] ` : ""}${item.req.text}`).join("\n"),
+		omittedCount: requirements.length - selected.length,
+	};
+}
+
+function summarizeSection(section: MarkdownSection, maxChars: number): string {
+	const lines = section.content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	if (section.content.length <= maxChars) return section.content;
+
+	const out: string[] = [];
+	let used = 0;
+	for (const line of lines) {
+		const addition = `${line}\n`;
+		if (used + addition.length > maxChars) break;
+		out.push(line);
+		used += addition.length;
+	}
+
+	const summary = out.join("\n").trim();
+	if (!summary) return `${section.heading ? `## ${section.heading}\n` : ""}[section summary omitted due to size]`;
+	return `${summary}\n\n[section summarized; omitted ${section.content.length - summary.length} characters]`;
+}
+
+function buildPromptPlan(markdown: string): PromptPlan {
+	if (markdown.length <= MAX_PLAN_CHARS) {
+		return { text: markdown, truncated: false, omittedSectionCount: 0 };
+	}
+
+	const sections = splitMarkdownSections(markdown);
+	if (sections.length === 0) {
+		const pseudoSection: MarkdownSection = { index: 0, content: markdown, priority: 0 };
+		return { text: summarizeSection(pseudoSection, MAX_PLAN_CHARS), truncated: true, omittedSectionCount: 0 };
+	}
+
+	const selected = new Map<number, string>();
+	let remaining = MAX_PLAN_CHARS;
+	const separatorCost = (currentCount: number) => (currentCount > 0 ? 2 : 0);
+	const tryInclude = (section: MarkdownSection, text: string) => {
+		if (selected.has(section.index)) return false;
+		const cost = text.length + separatorCost(selected.size);
+		if (cost > remaining) return false;
+		selected.set(section.index, text);
+		remaining -= cost;
+		return true;
+	};
+
+	const leadBudget = Math.min(4_000, Math.max(1_000, Math.floor(MAX_PLAN_CHARS * 0.2)));
+	tryInclude(sections[0], summarizeSection(sections[0], leadBudget));
+
+	for (const section of [...sections.slice(1)].sort((a, b) => b.priority - a.priority || a.index - b.index)) {
+		if (remaining <= 200) break;
+		tryInclude(section, summarizeSection(section, Math.min(SECTION_SUMMARY_MAX_CHARS, remaining)));
+	}
+
+	for (const section of [...sections].sort((a, b) => b.priority - a.priority || a.index - b.index)) {
+		const current = selected.get(section.index);
+		if (!current || current === section.content) continue;
+		const extraCost = section.content.length - current.length;
+		if (extraCost <= remaining) {
+			selected.set(section.index, section.content);
+			remaining -= extraCost;
+		}
+	}
+
+	const selectedSections = sections.filter((section) => selected.has(section.index));
+	const text = selectedSections.map((section) => selected.get(section.index)!).join("\n\n");
+	return {
+		text,
+		truncated: true,
+		omittedSectionCount: sections.length - selectedSections.length,
+	};
 }
 
 async function listFiles(rootDir: string, maxDepth: number): Promise<string[]> {
@@ -249,14 +429,14 @@ async function generateWithModel(
 	requirements: Requirement[],
 	outputPath: string,
 	repoContext: RepoContext,
+	signal?: AbortSignal,
 ): Promise<GeneratedSpec | null> {
 	if (!ctx.model) return null;
 	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
 	if (!apiKey) return null;
 
-	const requirementLines = requirements
-		.map((req, i) => `- ${i + 1}. ${req.heading ? `[${req.heading}] ` : ""}${req.text}`)
-		.join("\n");
+	const promptRequirements = buildPromptRequirements(requirements);
+	const promptPlan = buildPromptPlan(planText);
 
 	const exampleText = repoContext.testFileExamples.length
 		? repoContext.testFileExamples
@@ -291,11 +471,13 @@ Existing test examples:
 ${exampleText}
 
 Extracted requirements:
-${requirementLines || "(none extracted; infer from full markdown)"}
+${promptRequirements.text || "(none extracted; infer from full markdown)"}
+${promptRequirements.omittedCount > 0 ? `\n(${promptRequirements.omittedCount} extracted requirements omitted after prioritizing acceptance criteria, edge cases, and later sections)` : ""}
 
 Full markdown plan:
 
-${planText}`;
+${promptPlan.text}
+${promptPlan.truncated ? `\n\n[plan condensed for prompt size; omitted ${promptPlan.omittedSectionCount} lower-priority section(s)]` : ""}`;
 
 	const userMessage: UserMessage = {
 		role: "user",
@@ -306,7 +488,7 @@ ${planText}`;
 	const response = await complete(
 		ctx.model as Model<Api>,
 		{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-		{ apiKey },
+		{ apiKey, signal },
 	);
 
 	if (response.stopReason === "aborted" || response.stopReason === "error") return null;
@@ -339,6 +521,42 @@ function pickDefaultOutputPath(rootDir: string, planPath: string, repoContext: R
 async function writeJson(filePath: string, data: unknown): Promise<void> {
 	await ensureDir(filePath);
 	await fs.writeFile(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
+}
+
+async function runWithLoader<T>(
+	ctx: ExtensionContext,
+	message: string,
+	work: (signal?: AbortSignal) => Promise<T>,
+): Promise<{ cancelled: boolean; result?: T; error?: unknown }> {
+	if (!ctx.hasUI) {
+		try {
+			return { cancelled: false, result: await work() };
+		} catch (error) {
+			return { cancelled: false, error };
+		}
+	}
+
+	const result = await ctx.ui.custom<{ cancelled: boolean; result?: T; error?: unknown }>((tui, theme, _kb, done) => {
+		const loader = new BorderedLoader(tui, theme, message);
+		let settled = false;
+		const finish = (value: { cancelled: boolean; result?: T; error?: unknown }) => {
+			if (settled) return;
+			settled = true;
+			done(value);
+		};
+		loader.onAbort = () => finish({ cancelled: true });
+
+		work(loader.signal)
+			.then((value) => finish({ cancelled: false, result: value }))
+			.catch((error) => {
+				if (loader.signal.aborted) finish({ cancelled: true });
+				else finish({ cancelled: false, error });
+			});
+
+		return loader;
+	});
+
+	return result ?? { cancelled: true };
 }
 
 export default function tddPlanExtension(pi: ExtensionAPI) {
@@ -378,7 +596,18 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 			const pkg = await loadPackageJson(ctx.cwd);
 			const rootDir = pkg ? path.dirname(pkg.path) : ctx.cwd;
 			const framework = detectFramework(pkg?.data ?? null);
-			const repoContext = await inspectRepo(rootDir, pkg?.data ?? null, framework);
+			const repoScan = await runWithLoader(ctx, "Inspecting repository for local test conventions...", async () =>
+				inspectRepo(rootDir, pkg?.data ?? null, framework),
+			);
+			if (repoScan.cancelled) {
+				ctx.ui.notify("tdd-plan cancelled", "info");
+				return;
+			}
+			if (repoScan.error || !repoScan.result) {
+				ctx.ui.notify("Failed to inspect repository context for tdd-plan.", "error");
+				return;
+			}
+			const repoContext = repoScan.result;
 			const suggestedOutput = path.join("tests", "generated", `${slugify(path.basename(planPath))}.plan.spec.ts`);
 
 			if (!ctx.model) {
@@ -392,15 +621,34 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const generated = await generateWithModel(
-				ctx,
-				framework,
-				path.relative(rootDir, planPath),
-				planText,
-				requirements,
-				suggestedOutput,
-				repoContext,
+			if (planText.length > MAX_PLAN_CHARS) {
+				ctx.ui.notify(
+					`Plan is large (${planText.length.toLocaleString()} chars). Sending a section-aware condensed version to the model to avoid stalls.`,
+					"warning",
+				);
+			}
+
+			const generation = await runWithLoader(ctx, `Generating TDD tests using ${ctx.model.id}...`, (signal) =>
+				generateWithModel(
+					ctx,
+					framework,
+					path.relative(rootDir, planPath),
+					planText,
+					requirements,
+					suggestedOutput,
+					repoContext,
+					signal,
+				),
 			);
+			if (generation.cancelled) {
+				ctx.ui.notify("tdd-plan cancelled", "info");
+				return;
+			}
+			if (generation.error) {
+				ctx.ui.notify("AI test generation failed. Try again with the active model, or switch models and retry.", "error");
+				return;
+			}
+			const generated = generation.result;
 			if (!generated) {
 				ctx.ui.notify("AI test generation failed. Try again with the active model, or switch models and retry.", "error");
 				return;
@@ -459,12 +707,12 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				}
 				if (command) {
 					const result = await pi.exec("bash", ["-lc", `cd ${JSON.stringify(rootDir)} && ${command}`]);
-					if (result.code === 0) ctx.ui.notify("Generated tests already pass", "success");
+					if (result.code === 0) ctx.ui.notify("Generated tests already pass", "info");
 					else ctx.ui.notify("Generated tests executed", "info");
 				}
 			}
 
-			ctx.ui.notify(`Generated TDD tests: ${path.relative(rootDir, outputPath)}`, "success");
+			ctx.ui.notify(`Generated TDD tests: ${path.relative(rootDir, outputPath)}`, "info");
 			if (repoContext.testFileExamples.length > 0) {
 				ctx.ui.notify(`Matched local test conventions from ${repoContext.testFileExamples.length} example file(s)`, "info");
 			}
