@@ -34,6 +34,8 @@ type RepoContext = {
 	testFileExamples: Array<{ path: string; preview: string }>;
 	testDirectories: string[];
 	testNamingPatterns: string[];
+	testConfigDirectories: string[];
+	testConfigPatterns: string[];
 	testScriptDirectories: string[];
 	testScriptPatterns: string[];
 	sourceDirectories: string[];
@@ -375,41 +377,59 @@ function uniq<T>(items: T[]): T[] {
 	return [...new Set(items)];
 }
 
-function getTestScriptEntries(scripts: Record<string, string> | undefined): Array<[string, string]> {
-	return Object.entries(scripts ?? {}).filter(([name]) => name === "test" || name.startsWith("test:"));
+function getConfigTestEntries(files: string[]): string[] {
+	return files.filter((file) => {
+		const name = path.basename(file);
+		return /^(?:vitest|vite|jest|playwright|mocha)(?:\.workspace)?\.config\.(?:[cm]?[jt]s|mjs|cjs|mts|cts)$/.test(name);
+	});
 }
 
-function inferScriptTestDirectories(scriptEntries: Array<[string, string]>): string[] {
+function inferTestDirectoriesFromText(texts: string[]): string[] {
 	const dirs: string[] = [];
-	for (const [, script] of scriptEntries) {
-		for (const match of script.matchAll(/(?:^|[\s"'`])((?:__tests__|tests|test|src)(?:\/[A-Za-z0-9._-]+)*)/g)) {
-			const candidate = match[1]?.replace(/\/$/, "");
+	for (const text of texts) {
+		for (const match of text.matchAll(/(?:^|[\s"'`[(,])((?:__tests__|tests|test|src)(?:\/[A-Za-z0-9._*:-]+)*)?(?=\/|$|[\s"'`),\]])/g)) {
+			let candidate = match[1]?.replace(/\/$/, "") ?? "";
+			candidate = candidate.replace(/\/\*\*?(?:\/.*)?$/, "");
 			if (!candidate) continue;
-			if (/\.(?:[cm]?[jt]sx?)$/.test(candidate)) {
+			if (/[{*]/.test(path.basename(candidate))) {
+				dirs.push(path.dirname(candidate));
+			} else if (/\.(?:[cm]?[jt]sx?|mjs|cjs|mts|cts)$/.test(candidate)) {
 				dirs.push(path.dirname(candidate));
 			} else {
 				dirs.push(candidate);
 			}
 		}
 	}
-	return uniq(dirs.filter(Boolean));
+	return uniq(dirs.filter((dir) => dir && dir !== "."));
+}
+
+function inferTestPatternsFromText(texts: string[]): string[] {
+	const patterns: string[] = [];
+	for (const text of texts) {
+		for (const match of text.matchAll(/\.(spec|specs|test|tests)\.(tsx?|jsx?|mjs|cjs|mts|cts|js)/g)) {
+			patterns.push(`.${match[1]}.${match[2]}`);
+		}
+		if (/\bnode\s+--test\b/.test(text)) patterns.push(".test.ts");
+	}
+	return uniq(patterns);
+}
+
+function getTestScriptEntries(scripts: Record<string, string> | undefined): Array<[string, string]> {
+	return Object.entries(scripts ?? {}).filter(([name]) => name === "test" || name.startsWith("test:"));
+}
+
+function inferScriptTestDirectories(scriptEntries: Array<[string, string]>): string[] {
+	return inferTestDirectoriesFromText(scriptEntries.map(([, script]) => script));
 }
 
 function inferScriptTestPatterns(scriptEntries: Array<[string, string]>): string[] {
-	const patterns: string[] = [];
-	for (const [, script] of scriptEntries) {
-		for (const match of script.matchAll(/\.(spec|test)\.(tsx?|jsx?|mjs|cjs|js)/g)) {
-			patterns.push(`.${match[1]}.${match[2]}`);
-		}
-		if (/\bnode\s+--test\b/.test(script)) patterns.push(".test.ts");
-	}
-	return uniq(patterns);
+	return inferTestPatternsFromText(scriptEntries.map(([, script]) => script));
 }
 
 async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, framework: TestFramework): Promise<RepoContext> {
 	const files = await listFiles(rootDir, 4);
 	const rel = (p: string) => path.relative(rootDir, p);
-	const testFiles = files.filter((file) => /\.(spec|test)\.(ts|tsx)$/.test(file));
+	const testFiles = files.filter((file) => /\.(spec|specs|test|tests)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(file));
 	const examples = await Promise.all(
 		testFiles.slice(0, 6).map(async (file) => {
 			const content = await fs.readFile(file, "utf8").catch(() => "");
@@ -420,20 +440,42 @@ async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, fra
 		}),
 	);
 
+	const supportedPatterns = [
+		".tests.mjs",
+		".test.mjs",
+		".tests.cjs",
+		".test.cjs",
+		".tests.js",
+		".test.js",
+		".tests.jsx",
+		".test.jsx",
+		".tests.tsx",
+		".test.tsx",
+		".spec.tsx",
+		".tests.ts",
+		".test.ts",
+		".spec.ts",
+		".tests.js",
+		".test.js",
+		".spec.js",
+		".tests.mts",
+		".test.mts",
+		".spec.mts",
+		".tests.cts",
+		".test.cts",
+		".spec.cts",
+	];
 	const namingPatterns = uniq(
 		testFiles.map((file) => {
 			const name = path.basename(file);
-			if (name.endsWith(".spec.tsx")) return ".spec.tsx";
-			if (name.endsWith(".test.tsx")) return ".test.tsx";
-			if (name.endsWith(".spec.ts")) return ".spec.ts";
-			return ".test.ts";
+			return supportedPatterns.find((pattern) => name.endsWith(pattern)) ?? ".test.ts";
 		}),
 	);
 
 	const testDirs = uniq(testFiles.map((file) => path.dirname(rel(file)))).slice(0, 12);
 	const sourceDirs = uniq(
 		files
-			.filter((file) => /\.(ts|tsx)$/.test(file) && !/\.(spec|test)\.(ts|tsx)$/.test(file))
+			.filter((file) => /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(file) && !/\.(spec|specs|test|tests)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/.test(file))
 			.map((file) => rel(file).split(path.sep)[0])
 			.filter(Boolean),
 	).slice(0, 12);
@@ -442,6 +484,10 @@ async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, fra
 		...(pkg?.dependencies ?? {}),
 		...(pkg?.devDependencies ?? {}),
 	};
+	const configFiles = getConfigTestEntries(files);
+	const configContents = await Promise.all(configFiles.map((file) => fs.readFile(file, "utf8").catch(() => "")));
+	const configTestDirectories = inferTestDirectoriesFromText(configContents);
+	const configTestPatterns = inferTestPatternsFromText(configContents);
 	const scriptEntries = getTestScriptEntries(pkg?.scripts);
 	const scriptTestDirectories = inferScriptTestDirectories(scriptEntries);
 	const scriptTestPatterns = inferScriptTestPatterns(scriptEntries);
@@ -452,6 +498,8 @@ async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, fra
 		testFileExamples: examples,
 		testDirectories: testDirs,
 		testNamingPatterns: namingPatterns,
+		testConfigDirectories: configTestDirectories,
+		testConfigPatterns: configTestPatterns,
 		testScriptDirectories: scriptTestDirectories,
 		testScriptPatterns: scriptTestPatterns,
 		sourceDirectories: sourceDirs,
@@ -491,6 +539,8 @@ async function generateWithModel(
 			framework,
 			testDirectories: repoContext.testDirectories,
 			testNamingPatterns: repoContext.testNamingPatterns,
+			testConfigDirectories: repoContext.testConfigDirectories,
+			testConfigPatterns: repoContext.testConfigPatterns,
 			testScriptDirectories: repoContext.testScriptDirectories,
 			testScriptPatterns: repoContext.testScriptPatterns,
 			sourceDirectories: repoContext.sourceDirectories,
@@ -564,20 +614,23 @@ function normalizeSuggestedOutputPath(rootDir: string, suggested?: string): stri
 	if (!suggested?.trim()) return null;
 	const resolved = path.resolve(rootDir, suggested.trim());
 	if (!isPathInsideRoot(rootDir, resolved)) return null;
-	if (!/\.(?:[cm]?ts|tsx)$/i.test(resolved)) return null;
+	if (!/\.(?:[cm]?[jt]sx?|mjs|cjs|mts|cts)$/i.test(resolved)) return null;
 	return resolved;
 }
 
 function choosePreferredTestPattern(repoContext: RepoContext): string {
-	return (
-		repoContext.testScriptPatterns.find((pattern) => pattern === ".test.ts" || pattern === ".spec.ts") ??
-		repoContext.testNamingPatterns.find((pattern) => pattern === ".test.ts" || pattern === ".spec.ts") ??
-		(repoContext.framework === "jest" ? ".test.ts" : ".spec.ts")
-	);
+	const preferredConfigPattern = repoContext.testConfigPatterns[0];
+	if (preferredConfigPattern) return preferredConfigPattern;
+	const preferredScriptPattern = repoContext.testScriptPatterns[0];
+	if (preferredScriptPattern) return preferredScriptPattern;
+	const preferredNamedPattern = repoContext.testNamingPatterns[0];
+	if (preferredNamedPattern) return preferredNamedPattern;
+	return repoContext.framework === "jest" ? ".test.ts" : ".spec.ts";
 }
 
 function choosePreferredTestDirectory(repoContext: RepoContext): string {
 	const candidates = [
+		...repoContext.testConfigDirectories,
 		...repoContext.testScriptDirectories,
 		...repoContext.testDirectories,
 	];
@@ -595,7 +648,7 @@ function choosePreferredTestDirectory(repoContext: RepoContext): string {
 		if (dir === "src" || dir.startsWith("src/")) return dir;
 	}
 	if (repoContext.hasReact && repoContext.sourceDirectories.includes("src")) return "src";
-	return repoContext.testScriptDirectories[0] ?? repoContext.testDirectories[0] ?? "tests";
+	return repoContext.testConfigDirectories[0] ?? repoContext.testScriptDirectories[0] ?? repoContext.testDirectories[0] ?? "tests";
 }
 
 function buildDiscoveryAwareOutputPath(rootDir: string, planPath: string, repoContext: RepoContext): string {
@@ -654,6 +707,9 @@ async function runWithLoader<T>(
 
 export const __testables = {
 	detectFramework,
+	getConfigTestEntries,
+	inferTestDirectoriesFromText,
+	inferTestPatternsFromText,
 	inferScriptTestDirectories,
 	inferScriptTestPatterns,
 	isGenericSuggestedOutput,
@@ -780,6 +836,8 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				repoContext: {
 					testDirectories: repoContext.testDirectories,
 					testNamingPatterns: repoContext.testNamingPatterns,
+					testConfigDirectories: repoContext.testConfigDirectories,
+					testConfigPatterns: repoContext.testConfigPatterns,
 					testScriptDirectories: repoContext.testScriptDirectories,
 					testScriptPatterns: repoContext.testScriptPatterns,
 					sourceDirectories: repoContext.sourceDirectories,

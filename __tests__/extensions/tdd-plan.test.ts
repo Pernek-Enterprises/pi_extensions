@@ -24,6 +24,22 @@ test("inferScriptTestDirectories extracts colocated and dedicated test directori
 	assert.deepEqual(__testables.inferScriptTestDirectories(entries), ["src", "tests/smoke", "__tests__/api"]);
 });
 
+test("inferScriptTestPatterns preserves real script suffixes like .tests.mjs", () => {
+	const entries: Array<[string, string]> = [["test", "npm run mocha tests/**/*.tests.mjs"]];
+	assert.deepEqual(__testables.inferScriptTestPatterns(entries), [".tests.mjs"]);
+});
+
+test("config-file discovery extracts directories and patterns before script fallback", () => {
+	const configText = `export default defineConfig({ test: { include: ["tests/**/*.tests.mjs"] } })`;
+	assert.deepEqual(__testables.inferTestDirectoriesFromText([configText]), ["tests"]);
+	assert.deepEqual(__testables.inferTestPatternsFromText([configText]), [".tests.mjs"]);
+});
+
+test("node --test fallback keeps TypeScript output when no explicit suffix is present", () => {
+	const entries: Array<[string, string]> = [["test", "node --test"]];
+	assert.deepEqual(__testables.inferScriptTestPatterns(entries), [".test.ts"]);
+});
+
 test("pickDefaultOutputPath ignores unsafe model output outside the repo", () => {
 	const rootDir = "/repo";
 	const planPath = "/repo/plans/feature.md";
@@ -33,6 +49,8 @@ test("pickDefaultOutputPath ignores unsafe model output outside the repo", () =>
 		testFileExamples: [],
 		testDirectories: ["tests"],
 		testNamingPatterns: [".spec.ts"],
+		testConfigDirectories: [],
+		testConfigPatterns: [],
 		testScriptDirectories: [],
 		testScriptPatterns: [],
 		sourceDirectories: ["src"],
@@ -58,6 +76,8 @@ test("pickDefaultOutputPath honors safe non-generic model output inside the repo
 		testFileExamples: [],
 		testDirectories: ["tests"],
 		testNamingPatterns: [".spec.ts"],
+		testConfigDirectories: [],
+		testConfigPatterns: [],
 		testScriptDirectories: [],
 		testScriptPatterns: [],
 		sourceDirectories: ["src"],
@@ -82,6 +102,8 @@ test("choosePreferredTestDirectory prefers dedicated test directories over src",
 			testFileExamples: [],
 			testDirectories: ["tests"],
 			testNamingPatterns: [".spec.ts"],
+			testConfigDirectories: [],
+			testConfigPatterns: [],
 			testScriptDirectories: ["src", "tests"],
 			testScriptPatterns: [".test.ts"],
 			sourceDirectories: ["src"],
@@ -95,6 +117,33 @@ test("choosePreferredTestDirectory prefers dedicated test directories over src",
 	);
 });
 
+test("buildDiscoveryAwareOutputPath honors config-derived tests dir and .tests.mjs pattern", () => {
+	const rootDir = "/repo";
+	const planPath = "/repo/plans/login.md";
+	const repoContext = {
+		framework: "unknown" as const,
+		packageJsonPath: "package.json",
+		testFileExamples: [],
+		testDirectories: ["test"],
+		testNamingPatterns: [".test.js"],
+		testConfigDirectories: ["tests"],
+		testConfigPatterns: [".tests.mjs"],
+		testScriptDirectories: ["test"],
+		testScriptPatterns: [".test.js"],
+		sourceDirectories: ["src"],
+		hasTestingLibrary: false,
+		hasPlaywright: false,
+		hasNodeEnvironment: false,
+		hasReact: false,
+		scripts: { test: "npm run test test/**/*.test.js" },
+	};
+
+	assert.equal(
+		__testables.buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext),
+		"/repo/tests/login.plan.tests.mjs",
+	);
+});
+
 test("choosePreferredTestDirectory still uses src for colocated-only setups", () => {
 	assert.equal(
 		__testables.choosePreferredTestDirectory({
@@ -103,6 +152,8 @@ test("choosePreferredTestDirectory still uses src for colocated-only setups", ()
 			testFileExamples: [],
 			testDirectories: [],
 			testNamingPatterns: [".test.ts"],
+			testConfigDirectories: [],
+			testConfigPatterns: [],
 			testScriptDirectories: ["src"],
 			testScriptPatterns: [".test.ts"],
 			sourceDirectories: ["src"],
@@ -113,5 +164,28 @@ test("choosePreferredTestDirectory still uses src for colocated-only setups", ()
 			scripts: { test: "vitest run src/**/*.test.ts" },
 		}),
 		"src",
+	);
+});
+
+test("choosePreferredTestPattern keeps TypeScript fallback for jest when no repo hints exist", () => {
+	assert.equal(
+		__testables.choosePreferredTestPattern({
+			framework: "jest",
+			packageJsonPath: "package.json",
+			testFileExamples: [],
+			testDirectories: [],
+			testNamingPatterns: [],
+			testConfigDirectories: [],
+			testConfigPatterns: [],
+			testScriptDirectories: [],
+			testScriptPatterns: [],
+			sourceDirectories: ["src"],
+			hasTestingLibrary: false,
+			hasPlaywright: false,
+			hasNodeEnvironment: false,
+			hasReact: false,
+			scripts: {},
+		}),
+		".test.ts",
 	);
 });
