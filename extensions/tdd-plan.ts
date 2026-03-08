@@ -4,6 +4,12 @@ import { complete, type Api, type Model, type UserMessage } from "@mariozechner/
 import { BorderedLoader, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 type TestFramework = "vitest" | "jest" | "unknown";
+type LoopMode = "ask-each-round" | "auto-fix";
+type LoopStatus = "idle" | "generating" | "assessing" | "awaiting-user" | "promoting" | "completed" | "cancelled" | "failed";
+type LoopStopReason = "no-findings-remaining" | "user-accepted-current-output" | "safety-cap-reached" | "cancelled" | "generation-failed" | "assessment-failed";
+type AssessmentIsolationMode = "isolated-single-turn";
+type FindingCategory = "superficial-source-tests" | "missing-major-plan-coverage" | "non-executable-or-unrealistic" | "insufficient-behavioral-assertions" | "ambiguity" | "other";
+type FindingSeverity = "low" | "medium" | "high";
 
 type Requirement = {
 	text: string;
@@ -61,6 +67,71 @@ type GeneratedSpec = {
 	notes?: string[];
 };
 
+type AssessorFinding = {
+	category: FindingCategory;
+	severity: FindingSeverity;
+	title: string;
+	details: string;
+	fix: string;
+	requirement?: string;
+	evidence?: string[];
+};
+
+type AssessmentResult = {
+	verdict: "pass" | "fail";
+	summary: string;
+	findings: AssessorFinding[];
+	strengths?: string[];
+};
+
+type LoopIterationRecord = {
+	iteration: number;
+	stagedOutputPath: string;
+	coveragePath: string;
+	findingsPath: string;
+	generatorMetadataPath: string;
+	coveredRequirements: string[];
+	ambiguousRequirements: string[];
+	findingCategories: FindingCategory[];
+	verdict: "pass" | "fail";
+	summary: string;
+	continueDecision: "continue" | "accept" | "stop";
+};
+
+type TddLoopState = {
+	active: boolean;
+	repoRoot: string;
+	planPath: string;
+	slug: string;
+	loopMode: LoopMode;
+	status: LoopStatus;
+	iteration: number;
+	maxIterations: number;
+	startedAt: string;
+	updatedAt: string;
+	finalOutputPath?: string;
+	stagedOutputPath?: string;
+	stopReason?: LoopStopReason;
+	lastSummary?: string;
+	lastFindings?: AssessorFinding[];
+	assessmentIsolationMode?: AssessmentIsolationMode;
+	assessmentSessionId?: string;
+	assessmentOriginId?: string;
+	iterations: LoopIterationRecord[];
+};
+
+type TddPlanParsedArgs = {
+	planInput: string;
+	runTests: boolean;
+	loopMode?: LoopMode;
+};
+
+type GenerationOptions = {
+	iteration?: number;
+	priorTestCode?: string;
+	assessment?: AssessmentResult;
+};
+
 const SYSTEM_PROMPT = `You generate TypeScript acceptance tests from markdown implementation plans.
 
 Return strict JSON with this shape:
@@ -88,11 +159,46 @@ Rules:
 - Reuse local test idioms, imports, setup style, and folder conventions when examples are provided.
 - Favor the strongest realistic acceptance criteria you can infer from the plan goal and repository context.
 - If a requirement is vague, still create the best failing behavioral acceptance test you can, and list it in ambiguousRequirements.
+- When prior assessment findings are provided, treat them as concrete defects to fix in the next iteration.
+- Return raw JSON only. No markdown fences.`;
+
+const ASSESSOR_SYSTEM_PROMPT = `You are an independent reviewer of generated TypeScript tests created from a markdown implementation plan.
+
+Return strict JSON with this shape:
+{
+  "verdict": "pass" | "fail",
+  "summary": "short summary",
+  "findings": [
+    {
+      "category": "superficial-source-tests" | "missing-major-plan-coverage" | "non-executable-or-unrealistic" | "insufficient-behavioral-assertions" | "ambiguity" | "other",
+      "severity": "low" | "medium" | "high",
+      "title": "short title",
+      "details": "what is wrong and why",
+      "fix": "concrete change to make in the next round",
+      "requirement": "optional impacted requirement",
+      "evidence": ["optional evidence line or clue"]
+    }
+  ],
+  "strengths": ["optional strengths"]
+}
+
+Rules:
+- Review the generated tests, the plan, repository context, and generator metadata together.
+- Fail the suite when it contains superficial source scanning tests, file-content assertions, regex checks against source/markdown, missing major behavioral coverage, unrealistic/non-executable harness assumptions, or weak assertions that do not prove behavior.
+- Prefer the strongest realistic behavioral tests supported by the repository evidence; do not require full E2E coverage when the repo does not support it.
+- If the plan is vague, report ambiguity as a finding instead of passing the suite.
+- Keep findings concrete and actionable so another generation round can fix them.
 - Return raw JSON only. No markdown fences.`;
 
 const MAX_PLAN_CHARS = 24_000;
 const MAX_REQUIREMENTS_IN_PROMPT = 80;
 const SECTION_SUMMARY_MAX_CHARS = 1_200;
+const LOOP_MAX_ITERATIONS = 4;
+const TDD_LOOP_STATE_TYPE = "tdd-plan-loop-session";
+const TDD_LOOP_WIDGET_ID = "tdd-plan-loop";
+
+let activeLoopState: TddLoopState | undefined;
+let lastPersistedLoopStateJson: string | undefined;
 
 function stripCodeFences(text: string): string {
 	const match = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -591,31 +697,8 @@ async function inspectRepo(rootDir: string, pkg: Record<string, any> | null, fra
 	};
 }
 
-async function generateWithModel(
-	ctx: ExtensionContext,
-	framework: TestFramework,
-	planPath: string,
-	planText: string,
-	requirements: Requirement[],
-	outputPath: string,
-	repoContext: RepoContext,
-	signal?: AbortSignal,
-): Promise<GeneratedSpec | null> {
-	if (!ctx.model) return null;
-	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-	if (!apiKey) return null;
-
-	const behavioralTargets = collectBehavioralTargets(planText, requirements);
-	const promptRequirements = buildPromptRequirements(requirements, behavioralTargets);
-	const promptPlan = buildPromptPlan(planText);
-
-	const exampleText = repoContext.testFileExamples.length
-		? repoContext.testFileExamples
-				.map((example, index) => `### Example ${index + 1}: ${example.path}\n${example.preview}`)
-				.join("\n\n")
-		: "(No existing test examples found)";
-
-	const repoSummary = JSON.stringify(
+function buildRepoSummary(framework: TestFramework, repoContext: RepoContext): string {
+	return JSON.stringify(
 		{
 			framework,
 			testDirectories: repoContext.testDirectories,
@@ -634,6 +717,34 @@ async function generateWithModel(
 		null,
 		2,
 	);
+}
+
+async function generateWithModel(
+	ctx: ExtensionContext,
+	framework: TestFramework,
+	planPath: string,
+	planText: string,
+	requirements: Requirement[],
+	outputPath: string,
+	repoContext: RepoContext,
+	signal?: AbortSignal,
+	options: GenerationOptions = {},
+): Promise<GeneratedSpec | null> {
+	if (!ctx.model) return null;
+	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
+	if (!apiKey) return null;
+
+	const behavioralTargets = collectBehavioralTargets(planText, requirements);
+	const promptRequirements = buildPromptRequirements(requirements, behavioralTargets);
+	const promptPlan = buildPromptPlan(planText);
+
+	const exampleText = repoContext.testFileExamples.length
+		? repoContext.testFileExamples
+				.map((example, index) => `### Example ${index + 1}: ${example.path}\n${example.preview}`)
+				.join("\n\n")
+		: "(No existing test examples found)";
+
+	const repoSummary = buildRepoSummary(framework, repoContext);
 
 	const behavioralSummary = behavioralTargets.length > 0
 		? behavioralTargets
@@ -641,9 +752,14 @@ async function generateWithModel(
 			.join("\n")
 		: "(none extracted; infer the intended feature behavior from the full markdown)";
 
+	const improvementContext = options.assessment
+		? `\n\nAssessment findings from the previous iteration (fix these concretely):\nSummary: ${options.assessment.summary}\n${options.assessment.findings.length > 0 ? options.assessment.findings.map((finding, index) => `${index + 1}. [${finding.category}/${finding.severity}] ${finding.title}\n- Details: ${finding.details}\n- Fix: ${finding.fix}${finding.requirement ? `\n- Requirement: ${finding.requirement}` : ""}${finding.evidence?.length ? `\n- Evidence: ${finding.evidence.join(" | ")}` : ""}`).join("\n") : "- No explicit findings were provided."}${options.priorTestCode ? `\n\nPrevious staged test file to improve (do not preserve bad patterns blindly):\n\n${options.priorTestCode}` : ""}`
+		: "";
+
 	const userPrompt = `Framework: ${framework === "unknown" ? "Prefer Vitest but mirror local conventions" : framework}
 Suggested output path: ${outputPath}
 Plan path: ${planPath}
+Iteration: ${options.iteration ?? 1}
 
 Repository context:
 ${repoSummary}
@@ -659,7 +775,7 @@ ${promptRequirements.text || "(none extracted; infer from full markdown)"}
 ${promptRequirements.omittedCount > 0 ? `\n(${promptRequirements.omittedCount} behavioral requirements omitted after prioritizing acceptance criteria, edge cases, and goal-defining sections)` : ""}
 
 Important constraint:
-Do not test the plan file, markdown headings, documentation wording, or phrase presence. Test only the real feature behavior the plan is trying to achieve.
+Do not test the plan file, markdown headings, documentation wording, or phrase presence. Test only the real feature behavior the plan is trying to achieve.${improvementContext}
 
 Full markdown plan:
 
@@ -686,6 +802,209 @@ ${promptPlan.truncated ? `\n\n[plan condensed for prompt size; omitted ${promptP
 	const parsed = parseJson<GeneratedSpec>(text);
 	if (!parsed?.testCode) return null;
 	return parsed;
+}
+
+function normalizeAssessment(result: AssessmentResult | null): AssessmentResult {
+	if (!result) {
+		return {
+			verdict: "fail",
+			summary: "Assessment response was invalid JSON.",
+			findings: [{
+				category: "other",
+				severity: "high",
+				title: "Invalid assessor response",
+				details: "The assessment pass did not return valid structured JSON.",
+				fix: "Re-run assessment with strict JSON output and concrete findings.",
+			}],
+			strengths: [],
+		};
+	}
+	const findings = Array.isArray(result.findings)
+		? result.findings
+			.map((finding) => ({
+				category: finding.category ?? "other",
+				severity: finding.severity ?? "medium",
+				title: finding.title ?? "Finding",
+				details: finding.details ?? "Details missing.",
+				fix: finding.fix ?? "Improve the generated tests.",
+				requirement: finding.requirement,
+				evidence: Array.isArray(finding.evidence) ? finding.evidence.map(String) : undefined,
+			}))
+			.filter((finding) => finding.title && finding.details)
+		: [];
+	return {
+		verdict: result.verdict === "pass" && findings.length === 0 ? "pass" : findings.length > 0 ? "fail" : result.verdict,
+		summary: result.summary || (findings.length === 0 ? "No issues found." : "Issues found."),
+		findings,
+		strengths: Array.isArray(result.strengths) ? result.strengths.map(String) : [],
+	};
+}
+
+function detectSuperficialPatterns(testCode: string): AssessorFinding[] {
+	const findings: AssessorFinding[] = [];
+	const normalized = testCode.toLowerCase();
+	const add = (title: string, details: string, fix: string, evidence: string[]) => {
+		findings.push({
+			category: "superficial-source-tests",
+			severity: "high",
+			title,
+			details,
+			fix,
+			evidence,
+		});
+	};
+
+	if (/readfile|readfilesync|fs\./i.test(testCode) && /plan/i.test(testCode)) {
+		add(
+			"Reads plan/documentation files inside tests",
+			"The generated tests appear to inspect plan or documentation content instead of exercising product behavior.",
+			"Replace plan/documentation file assertions with executable behavioral checks against the real system surface.",
+			[testCode.match(/.{0,40}(?:readfile|readfilesync|fs\.).{0,80}/i)?.[0] ?? "fs usage detected"],
+		);
+	}
+	const markdownAssertionPattern = /(?:toContain|toMatch|match)\((?:.|\n){0,120}(?:##\s|markdown|plan file|acceptance criteria|open questions)/i;
+	if (markdownAssertionPattern.test(testCode)) {
+		add(
+			"Asserts on markdown/source text",
+			"The generated tests appear to assert on markdown headings, wording, or source text patterns rather than system behavior.",
+			"Assert on runtime behavior, API responses, rendered UI, commands, or observable outputs instead of text content.",
+			[testCode.match(/.{0,30}(?:toContain|toMatch|match)\((?:.|\n){0,120}/i)?.[0] ?? "string/regex assertion against documentation detected"],
+		);
+	}
+	if (/expect\s*\(\s*(?:source|filecontent|markdown)\b/i.test(normalized)) {
+		add(
+			"Uses source-content expectations",
+			"The generated tests directly inspect source or markdown strings.",
+			"Refactor the tests to execute the feature behavior through supported seams in the repository.",
+			[testCode.match(/.{0,30}expect\s*\(\s*(?:source|fileContent|markdown).{0,80}/i)?.[0] ?? "source-content expectation detected"],
+		);
+	}
+	return findings;
+}
+
+function tokenizeRequirementText(text: string): string[] {
+	return text
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((token) => token.length >= 4)
+		.map((token) => token.endsWith("s") ? token.slice(0, -1) : token);
+}
+
+function requirementCoverageMatches(requirement: string, coveredRequirement: string): boolean {
+	const normalizedRequirement = requirement.toLowerCase().trim();
+	const normalizedCovered = coveredRequirement.toLowerCase().trim();
+	if (!normalizedRequirement || !normalizedCovered) return false;
+	if (normalizedCovered.includes(normalizedRequirement) || normalizedRequirement.includes(normalizedCovered)) return true;
+
+	const requirementTokens = uniq(tokenizeRequirementText(requirement));
+	const coveredTokens = new Set(tokenizeRequirementText(coveredRequirement));
+	if (requirementTokens.length === 0 || coveredTokens.size === 0) return false;
+
+	const overlap = requirementTokens.filter((token) => coveredTokens.has(token));
+	const overlapRatio = overlap.length / requirementTokens.length;
+	return overlap.length >= 2 && overlapRatio >= 0.5;
+}
+
+function detectCoverageGaps(requirements: Requirement[], coveredRequirements: string[]): AssessorFinding[] {
+	const important = requirements.filter((req) => {
+		const heading = req.heading?.toLowerCase() ?? "";
+		return /acceptance|requested feature|problem statement|scope|clarified decisions|edge cases|performance|rollout|observability|security/.test(heading);
+	});
+	const missing = important.filter((req) => !coveredRequirements.some((covered) => requirementCoverageMatches(req.text, covered)));
+	if (missing.length === 0) return [];
+	return missing.slice(0, 4).map((req) => ({
+		category: "missing-major-plan-coverage",
+		severity: "medium",
+		title: "Missing major behavioral requirement",
+		details: `No generated coverage entry clearly maps to: ${req.text}`,
+		fix: "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+		requirement: req.text,
+		evidence: req.heading ? [`section: ${req.heading}`] : undefined,
+	}));
+}
+
+async function assessGeneratedSpec(
+	ctx: ExtensionContext,
+	framework: TestFramework,
+	planPath: string,
+	planText: string,
+	requirements: Requirement[],
+	repoContext: RepoContext,
+	generated: GeneratedSpec,
+	stagedOutputPath: string,
+	signal?: AbortSignal,
+): Promise<AssessmentResult | null> {
+	if (!ctx.model) return null;
+	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
+	if (!apiKey) return null;
+
+	const promptPlan = buildPromptPlan(planText);
+	const repoSummary = buildRepoSummary(framework, repoContext);
+	const userPrompt = `Review this generated test suite independently.
+
+Plan path: ${planPath}
+Staged output path: ${stagedOutputPath}
+
+Repository context:
+${repoSummary}
+
+Generator metadata:
+${JSON.stringify({
+	framework: generated.framework,
+	outputPath: generated.outputPath,
+	coveredRequirements: generated.coveredRequirements,
+	ambiguousRequirements: generated.ambiguousRequirements ?? [],
+	notes: generated.notes ?? [],
+}, null, 2)}
+
+Full generated tests:
+
+${generated.testCode}
+
+Prioritized plan requirements:
+${requirements.map((req, index) => `- ${index + 1}. ${req.heading ? `[${req.heading}] ` : ""}${req.text}`).join("\n") || "(none extracted)"}
+
+Condensed plan:
+
+${promptPlan.text}
+${promptPlan.truncated ? `\n\n[plan condensed for prompt size; omitted ${promptPlan.omittedSectionCount} lower-priority section(s)]` : ""}`;
+
+	const userMessage: UserMessage = {
+		role: "user",
+		content: [{ type: "text", text: userPrompt }],
+		timestamp: Date.now(),
+	};
+
+	const response = await complete(
+		ctx.model as Model<Api>,
+		{ systemPrompt: ASSESSOR_SYSTEM_PROMPT, messages: [userMessage] },
+		{ apiKey, signal },
+	);
+
+	if (response.stopReason === "aborted" || response.stopReason === "error") return null;
+	const text = response.content
+		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.map((c) => c.text)
+		.join("\n");
+	const parsed = normalizeAssessment(parseJson<AssessmentResult>(text));
+
+	const heuristicFindings = [
+		...detectSuperficialPatterns(generated.testCode),
+		...detectCoverageGaps(requirements, generated.coveredRequirements),
+	];
+	if (heuristicFindings.length === 0) return parsed;
+
+	const merged = [...parsed.findings];
+	for (const heuristic of heuristicFindings) {
+		const duplicate = merged.some((finding) => finding.category === heuristic.category && finding.title === heuristic.title && finding.requirement === heuristic.requirement);
+		if (!duplicate) merged.push(heuristic);
+	}
+	return {
+		verdict: merged.length === 0 ? "pass" : "fail",
+		summary: merged.length === 0 ? parsed.summary : parsed.summary || `Found ${merged.length} issue(s).`,
+		findings: merged,
+		strengths: parsed.strengths ?? [],
+	};
 }
 
 async function ensureDir(filePath: string): Promise<void> {
@@ -757,6 +1076,30 @@ function pickDefaultOutputPath(rootDir: string, planPath: string, repoContext: R
 	return buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext);
 }
 
+function buildLoopArtifactsBaseDir(rootDir: string, planPath: string): string {
+	return path.join(rootDir, ".pi", "generated-tdd", slugify(path.basename(planPath)));
+}
+
+function buildLoopIterationPaths(rootDir: string, planPath: string, repoContext: RepoContext, iteration: number): {
+	baseDir: string;
+	stagedOutputPath: string;
+	coveragePath: string;
+	findingsPath: string;
+	generatorMetadataPath: string;
+} {
+	const baseDir = buildLoopArtifactsBaseDir(rootDir, planPath);
+	const finalPath = buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext);
+	const ext = path.extname(finalPath);
+	const baseName = path.basename(finalPath, ext);
+	return {
+		baseDir,
+		stagedOutputPath: path.join(baseDir, `${baseName}.iteration-${iteration}${ext}`),
+		coveragePath: path.join(baseDir, `iteration-${iteration}.coverage.json`),
+		findingsPath: path.join(baseDir, `iteration-${iteration}.findings.json`),
+		generatorMetadataPath: path.join(baseDir, `iteration-${iteration}.generator.json`),
+	};
+}
+
 async function writeJson(filePath: string, data: unknown): Promise<void> {
 	await ensureDir(filePath);
 	await fs.writeFile(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
@@ -802,8 +1145,643 @@ async function runWithLoader<T>(
 	return result ?? { cancelled: true };
 }
 
+function getStateContainer(ctx: any): Record<string, any> {
+	if (!ctx.state) ctx.state = {};
+	return ctx.state;
+}
+
+function getCurrentLeafId(ctx: any): string | undefined {
+	return ctx?.sessionManager?.getLeafId?.() ?? ctx?.sessionManager?.getLeafEntry?.()?.id ?? ctx?.currentLeafId;
+}
+
+function getSessionEntries(ctx: any): any[] {
+	return ctx?.sessionManager?.getEntries?.() ?? [];
+}
+
+function getCustomEntryData(entry: any): any | undefined {
+	if (!entry || entry.type !== "custom") return undefined;
+	if (Object.prototype.hasOwnProperty.call(entry, "data")) return entry.data;
+	if (Object.prototype.hasOwnProperty.call(entry, "value")) return entry.value;
+	return undefined;
+}
+
+function appendCustomEntry(target: any, customType: string, data: unknown): any {
+	const appendEntry = target?.appendEntry;
+	if (typeof appendEntry !== "function") return undefined;
+	if (appendEntry.length >= 2) {
+		return appendEntry(customType, data);
+	}
+	return appendEntry({ type: "custom", customType, data });
+}
+
+function getLoopState(ctx: any): TddLoopState | undefined {
+	const container = getStateContainer(ctx);
+	if (Object.prototype.hasOwnProperty.call(container, "tddPlanLoop")) return container.tddPlanLoop;
+	return undefined;
+}
+
+function loadPersistedLoopState(ctx: any): TddLoopState | undefined {
+	const entries = getSessionEntries(ctx);
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry?.type !== "custom" || entry?.customType !== TDD_LOOP_STATE_TYPE) continue;
+		const data = getCustomEntryData(entry);
+		if (!data || data.active === false) return undefined;
+		activeLoopState = data as TddLoopState;
+		lastPersistedLoopStateJson = JSON.stringify(activeLoopState);
+		getStateContainer(ctx).tddPlanLoop = activeLoopState;
+		return activeLoopState;
+	}
+	return undefined;
+}
+
+async function applyLoopState(ctx: any, state: TddLoopState): Promise<TddLoopState> {
+	activeLoopState = state;
+	getStateContainer(ctx).tddPlanLoop = state;
+	const json = JSON.stringify(state);
+	if (json !== lastPersistedLoopStateJson) {
+		appendCustomEntry(ctx.pi ?? ctx, TDD_LOOP_STATE_TYPE, state);
+		lastPersistedLoopStateJson = json;
+	}
+	return state;
+}
+
+async function clearLoopState(ctx: any): Promise<void> {
+	activeLoopState = undefined;
+	delete getStateContainer(ctx).tddPlanLoop;
+	const clearedJson = JSON.stringify({ active: false });
+	if (clearedJson !== lastPersistedLoopStateJson) {
+		appendCustomEntry(ctx.pi ?? ctx, TDD_LOOP_STATE_TYPE, { active: false });
+		lastPersistedLoopStateJson = clearedJson;
+	}
+}
+
+async function setLoopWidget(ctx: any, state?: TddLoopState): Promise<void> {
+	if (!ctx?.ui) return;
+	if (!state?.active) {
+		if (typeof ctx.ui.clearWidget === "function") {
+			ctx.ui.clearWidget(TDD_LOOP_WIDGET_ID);
+			return;
+		}
+		if (typeof ctx.ui.setWidget === "function") {
+			if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(TDD_LOOP_WIDGET_ID, undefined);
+			else ctx.ui.setWidget(undefined);
+		}
+		return;
+	}
+	const lines = [
+		`TDD loop active (${state.iteration}/${state.maxIterations})`,
+		`${state.loopMode} · ${state.status}`,
+		state.lastSummary ? state.lastSummary.slice(0, 100) : `plan: ${state.slug}`,
+	];
+	if (typeof ctx.ui.setWidget === "function") {
+		if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(TDD_LOOP_WIDGET_ID, lines);
+		else ctx.ui.setWidget(lines.join("\n"));
+	}
+}
+
+async function restoreLoopStateOnEvent(ctx: any): Promise<TddLoopState | undefined> {
+	const state = getLoopState(ctx) ?? loadPersistedLoopState(ctx);
+	if (state?.active) {
+		await setLoopWidget(ctx, state);
+		return state;
+	}
+	await setLoopWidget(ctx, undefined);
+	return undefined;
+}
+
+async function startAssessmentIsolationBranch(ctx: any): Promise<{ originId?: string; sessionId?: string }> {
+	if (typeof ctx.navigateTree !== "function") return {};
+	const originId = getCurrentLeafId(ctx);
+	const entries = ctx?.sessionManager?.getEntries?.() ?? [];
+	const firstUserMessage = entries.find((entry: any) => entry.type === "message" && entry.message?.role === "user");
+	const targetId = firstUserMessage?.id ?? originId;
+	if (!targetId) return { originId };
+	const result = await ctx.navigateTree(targetId, { summarize: false, label: "tdd-plan-assessment" });
+	if (result?.cancelled) return { originId };
+	if (typeof ctx?.ui?.setEditorText === "function") ctx.ui.setEditorText("");
+	return { originId, sessionId: getCurrentLeafId(ctx) };
+}
+
+async function returnFromAssessmentIsolationBranch(ctx: any, originId?: string): Promise<void> {
+	if (!originId || typeof ctx.navigateTree !== "function") return;
+	await ctx.navigateTree(originId, { summarize: false });
+}
+
+function parseTddPlanArgs(rawArgs: string): TddPlanParsedArgs {
+	let value = rawArgs.trim();
+	const takeFlag = (flag: string) => {
+		const before = value;
+		value = value.replace(new RegExp(`(?:^|\\s)${flag}(?=\\s|$)`, "g"), " ").trim();
+		return before !== value;
+	};
+	const runTests = takeFlag("--run");
+	const loopAuto = takeFlag("--loop-auto");
+	const loopAsk = takeFlag("--loop-ask");
+	const loop = takeFlag("--loop");
+	const loopMode = loopAuto ? "auto-fix" : (loopAsk || loop ? "ask-each-round" : undefined);
+	return {
+		planInput: value.trim(),
+		runTests,
+		loopMode,
+	};
+}
+
+async function chooseLoopModeAtStart(ctx: ExtensionContext, directLoopCommand: boolean): Promise<LoopMode | "single-pass" | null> {
+	if (!ctx.hasUI || typeof ctx.ui.select !== "function") return directLoopCommand ? "ask-each-round" : "single-pass";
+	const choice = await ctx.ui.select(
+		directLoopCommand ? "Loop behavior" : "Choose TDD generation mode",
+		directLoopCommand
+			? ["Loop: ask after each round", "Loop: auto-fix until clean"]
+			: ["Single pass", "Loop: ask after each round", "Loop: auto-fix until clean"],
+	);
+	if (!choice) return null;
+	if (choice === "Single pass") return "single-pass";
+	return choice.includes("auto-fix") ? "auto-fix" : "ask-each-round";
+}
+
+async function maybeConfirmOverwrite(ctx: ExtensionContext, outputPath: string): Promise<boolean> {
+	if (!(await exists(outputPath)) || !ctx.hasUI) return true;
+	const overwrite = await ctx.ui.confirm("Overwrite generated test file?", outputPath);
+	return Boolean(overwrite);
+}
+
+async function runGeneratedTests(pi: ExtensionAPI, rootDir: string, outputPath: string, generatedFramework: TestFramework, detectedFramework: TestFramework): Promise<void> {
+	let command: string | null = null;
+	if (generatedFramework === "vitest" || detectedFramework === "vitest") {
+		command = `npx vitest run ${JSON.stringify(path.relative(rootDir, outputPath))}`;
+	} else if (generatedFramework === "jest" || detectedFramework === "jest") {
+		command = `npx jest ${JSON.stringify(path.relative(rootDir, outputPath))}`;
+	}
+	if (!command) return;
+	await pi.exec("bash", ["-lc", `cd ${JSON.stringify(rootDir)} && ${command}`]);
+}
+
+async function prepareGenerationContext(ctx: ExtensionContext, planInput: string): Promise<{
+	planPath: string;
+	planText: string;
+	requirements: Requirement[];
+	pkg: { path: string; data: Record<string, any> } | null;
+	rootDir: string;
+	framework: TestFramework;
+	repoContext: RepoContext;
+	suggestedOutput: string;
+}> {
+	const planPath = path.resolve(ctx.cwd, planInput);
+	if (!(await exists(planPath))) throw new Error(`Plan file not found: ${planPath}`);
+
+	const planText = await fs.readFile(planPath, "utf8");
+	const requirements = extractRequirements(planText);
+	const pkg = await loadPackageJson(ctx.cwd);
+	const rootDir = pkg ? path.dirname(pkg.path) : ctx.cwd;
+	const framework = detectFramework(pkg?.data ?? null);
+	const repoScan = await runWithLoader(ctx, "Inspecting repository for local test conventions...", async () =>
+		inspectRepo(rootDir, pkg?.data ?? null, framework),
+	);
+	if (repoScan.cancelled) throw new Error("cancelled");
+	if (repoScan.error || !repoScan.result) throw new Error("Failed to inspect repository context for tdd-plan.");
+	const repoContext = repoScan.result;
+	const suggestedOutput = buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext);
+
+	return {
+		planPath,
+		planText,
+		requirements,
+		pkg,
+		rootDir,
+		framework,
+		repoContext,
+		suggestedOutput,
+	};
+}
+
+async function assertModelReady(ctx: ExtensionContext): Promise<void> {
+	if (!ctx.model) throw new Error("No active model selected. Select a model first, then run /tdd-plan again.");
+	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
+	if (!apiKey) throw new Error("The active model has no API key/session available. Authenticate first, then run /tdd-plan again.");
+}
+
+async function generateSinglePass(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	prepared: Awaited<ReturnType<typeof prepareGenerationContext>>,
+	runTests: boolean,
+): Promise<void> {
+	const { planPath, planText, requirements, rootDir, framework, repoContext, suggestedOutput } = prepared;
+	const generation = await runWithLoader(ctx, `Generating TDD tests using ${ctx.model?.id ?? "model"}...`, (signal) =>
+		generateWithModel(
+			ctx,
+			framework,
+			path.relative(rootDir, planPath),
+			planText,
+			requirements,
+			suggestedOutput,
+			repoContext,
+			signal,
+		),
+	);
+	if (generation.cancelled) {
+		notify(ctx, "tdd-plan cancelled", "info");
+		return;
+	}
+	if (generation.error || !generation.result) {
+		notify(ctx, "AI test generation failed. Try again with the active model, or switch models and retry.", "error");
+		return;
+	}
+	const generated = generation.result;
+	const outputPath = pickDefaultOutputPath(rootDir, planPath, repoContext, generated.outputPath || suggestedOutput);
+	const coveragePath = path.join(rootDir, ".pi", "generated-tdd", `${slugify(path.basename(planPath))}.coverage.json`);
+	const ambiguousPath = path.join(rootDir, ".pi", "generated-tdd", `${slugify(path.basename(planPath))}.ambiguous.md`);
+
+	if (!(await maybeConfirmOverwrite(ctx, outputPath))) {
+		notify(ctx, "tdd-plan cancelled", "info");
+		return;
+	}
+
+	await ensureDir(outputPath);
+	await fs.writeFile(outputPath, generated.testCode.endsWith("\n") ? generated.testCode : generated.testCode + "\n", "utf8");
+	await writeJson(coveragePath, {
+		planPath: path.relative(rootDir, planPath),
+		framework: generated.framework,
+		outputPath: path.relative(rootDir, outputPath),
+		repoContext: {
+			testDirectories: repoContext.testDirectories,
+			testNamingPatterns: repoContext.testNamingPatterns,
+			testConfigDirectories: repoContext.testConfigDirectories,
+			testConfigPatterns: repoContext.testConfigPatterns,
+			testScriptDirectories: repoContext.testScriptDirectories,
+			testScriptPatterns: repoContext.testScriptPatterns,
+			sourceDirectories: repoContext.sourceDirectories,
+			hasTestingLibrary: repoContext.hasTestingLibrary,
+			hasPlaywright: repoContext.hasPlaywright,
+			hasNodeEnvironment: repoContext.hasNodeEnvironment,
+			hasReact: repoContext.hasReact,
+		},
+		requirements: requirements.map((r) => ({ text: r.text, heading: r.heading ?? null })),
+		coveredRequirements: generated.coveredRequirements,
+		ambiguousRequirements: generated.ambiguousRequirements ?? [],
+		notes: generated.notes ?? [],
+		generatedAt: new Date().toISOString(),
+	});
+
+	const ambiguous = generated.ambiguousRequirements ?? [];
+	if (ambiguous.length > 0) {
+		await ensureDir(ambiguousPath);
+		const body =
+			`# Ambiguous requirements\n\nGenerated from: ${path.relative(rootDir, planPath)}\n\n` +
+			ambiguous.map((item) => `- ${item}`).join("\n") +
+			"\n";
+		await fs.writeFile(ambiguousPath, body, "utf8");
+	} else if (await exists(ambiguousPath)) {
+		await fs.rm(ambiguousPath, { force: true });
+	}
+
+	if (runTests) await runGeneratedTests(pi, rootDir, outputPath, generated.framework, framework);
+
+	notify(ctx, `Generated TDD tests: ${path.relative(rootDir, outputPath)}`, "info");
+	if (repoContext.testFileExamples.length > 0) {
+		notify(ctx, `Matched local test conventions from ${repoContext.testFileExamples.length} example file(s)`, "info");
+	}
+	if (ambiguous.length > 0) notify(ctx, `Ambiguous requirements flagged: ${ambiguous.length}`, "warning");
+}
+
+async function runTddPlanLoop(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	prepared: Awaited<ReturnType<typeof prepareGenerationContext>>,
+	loopMode: LoopMode,
+	runTests: boolean,
+): Promise<void> {
+	const { planPath, planText, requirements, rootDir, framework, repoContext, suggestedOutput } = prepared;
+	const slug = slugify(path.basename(planPath));
+	const finalOutputPath = pickDefaultOutputPath(rootDir, planPath, repoContext, suggestedOutput);
+	const coveragePath = path.join(rootDir, ".pi", "generated-tdd", `${slug}.coverage.json`);
+	const ambiguousPath = path.join(rootDir, ".pi", "generated-tdd", `${slug}.ambiguous.md`);
+	const loopSummaryPath = path.join(buildLoopArtifactsBaseDir(rootDir, planPath), "loop-summary.json");
+
+	if (!(await maybeConfirmOverwrite(ctx, finalOutputPath))) {
+		notify(ctx, "tdd-plan loop cancelled", "info");
+		return;
+	}
+
+	let state: TddLoopState = {
+		active: true,
+		repoRoot: rootDir,
+		planPath: path.relative(rootDir, planPath),
+		slug,
+		loopMode,
+		status: "generating",
+		iteration: 0,
+		maxIterations: LOOP_MAX_ITERATIONS,
+		startedAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		finalOutputPath: path.relative(rootDir, finalOutputPath),
+		assessmentIsolationMode: "isolated-single-turn",
+		iterations: [],
+	};
+	await applyLoopState({ ...ctx, pi }, state);
+	await setLoopWidget(ctx, state);
+
+	let previousTestCode: string | undefined;
+	let previousAssessment: AssessmentResult | undefined;
+	let accepted: { generated: GeneratedSpec; stagedOutputPath: string } | undefined;
+
+	for (let iteration = 1; iteration <= LOOP_MAX_ITERATIONS; iteration++) {
+		state = await applyLoopState({ ...ctx, pi }, {
+			...state,
+			status: "generating",
+			iteration,
+			updatedAt: new Date().toISOString(),
+		});
+		await setLoopWidget(ctx, state);
+
+		const iterationPaths = buildLoopIterationPaths(rootDir, planPath, repoContext, iteration);
+		const generation = await runWithLoader(ctx, `Generating behavioral tests (round ${iteration}/${LOOP_MAX_ITERATIONS})...`, (signal) =>
+			generateWithModel(
+				ctx,
+				framework,
+				path.relative(rootDir, planPath),
+				planText,
+				requirements,
+				finalOutputPath,
+				repoContext,
+				signal,
+				{ iteration, priorTestCode: previousTestCode, assessment: previousAssessment },
+			),
+		);
+		if (generation.cancelled) {
+			state = await applyLoopState({ ...ctx, pi }, {
+				...state,
+				status: "cancelled",
+				stopReason: "cancelled",
+				lastSummary: "Loop cancelled during generation.",
+				updatedAt: new Date().toISOString(),
+			});
+			await writeJson(loopSummaryPath, state);
+			await clearLoopState({ ...ctx, pi });
+			await setLoopWidget(ctx, undefined);
+			notify(ctx, "tdd-plan loop cancelled", "info");
+			return;
+		}
+		if (generation.error || !generation.result) {
+			state = await applyLoopState({ ...ctx, pi }, {
+				...state,
+				status: "failed",
+				stopReason: "generation-failed",
+				lastSummary: "Generation failed.",
+				updatedAt: new Date().toISOString(),
+			});
+			await writeJson(loopSummaryPath, state);
+			await clearLoopState({ ...ctx, pi });
+			await setLoopWidget(ctx, undefined);
+			notify(ctx, "AI test generation failed during loop mode.", "error");
+			return;
+		}
+		const generated = generation.result;
+		await ensureDir(iterationPaths.stagedOutputPath);
+		await fs.writeFile(iterationPaths.stagedOutputPath, generated.testCode.endsWith("\n") ? generated.testCode : generated.testCode + "\n", "utf8");
+		await writeJson(iterationPaths.generatorMetadataPath, {
+			planPath: path.relative(rootDir, planPath),
+			stagedOutputPath: path.relative(rootDir, iterationPaths.stagedOutputPath),
+			framework: generated.framework,
+			coveredRequirements: generated.coveredRequirements,
+			ambiguousRequirements: generated.ambiguousRequirements ?? [],
+			notes: generated.notes ?? [],
+			generatedAt: new Date().toISOString(),
+		});
+		await writeJson(iterationPaths.coveragePath, {
+			planPath: path.relative(rootDir, planPath),
+			framework: generated.framework,
+			outputPath: path.relative(rootDir, iterationPaths.stagedOutputPath),
+			requirements: requirements.map((r) => ({ text: r.text, heading: r.heading ?? null })),
+			coveredRequirements: generated.coveredRequirements,
+			ambiguousRequirements: generated.ambiguousRequirements ?? [],
+			notes: generated.notes ?? [],
+			generatedAt: new Date().toISOString(),
+		});
+
+		state = await applyLoopState({ ...ctx, pi }, {
+			...state,
+			status: "assessing",
+			stagedOutputPath: path.relative(rootDir, iterationPaths.stagedOutputPath),
+			updatedAt: new Date().toISOString(),
+		});
+		await setLoopWidget(ctx, state);
+
+		let assessmentOriginId: string | undefined;
+		let assessmentSessionId: string | undefined;
+		if (typeof ctx.navigateTree === "function") {
+			try {
+				const isolation = await startAssessmentIsolationBranch(ctx);
+				assessmentOriginId = isolation.originId;
+				assessmentSessionId = isolation.sessionId;
+			} catch {
+				assessmentOriginId = undefined;
+				assessmentSessionId = undefined;
+			}
+		}
+		state = await applyLoopState({ ...ctx, pi }, {
+			...state,
+			assessmentOriginId,
+			assessmentSessionId,
+			updatedAt: new Date().toISOString(),
+		});
+		const assessmentRun = await runWithLoader(ctx, `Assessing generated tests independently (round ${iteration}/${LOOP_MAX_ITERATIONS})...`, (signal) =>
+			assessGeneratedSpec(
+				ctx,
+				framework,
+				path.relative(rootDir, planPath),
+				planText,
+				requirements,
+				repoContext,
+				generated,
+				path.relative(rootDir, iterationPaths.stagedOutputPath),
+				signal,
+			),
+		);
+		if (assessmentOriginId) {
+			await returnFromAssessmentIsolationBranch(ctx, assessmentOriginId);
+			state = await applyLoopState({ ...ctx, pi }, {
+				...state,
+				assessmentOriginId: undefined,
+				assessmentSessionId: undefined,
+				updatedAt: new Date().toISOString(),
+			});
+		}
+		if (assessmentRun.cancelled) {
+			state = await applyLoopState({ ...ctx, pi }, {
+				...state,
+				status: "cancelled",
+				stopReason: "cancelled",
+				lastSummary: "Loop cancelled during assessment.",
+				updatedAt: new Date().toISOString(),
+			});
+			await writeJson(loopSummaryPath, state);
+			await clearLoopState({ ...ctx, pi });
+			await setLoopWidget(ctx, undefined);
+			notify(ctx, "tdd-plan loop cancelled", "info");
+			return;
+		}
+		const assessment = assessmentRun.result ? normalizeAssessment(assessmentRun.result) : normalizeAssessment(null);
+		if (assessmentRun.error) {
+			assessment.findings.push({
+				category: "other",
+				severity: "high",
+				title: "Assessment execution failed",
+				details: "The assessment step threw an error.",
+				fix: "Re-run the assessment step with the same inputs and return strict JSON.",
+			});
+			assessment.verdict = "fail";
+		}
+		await writeJson(iterationPaths.findingsPath, assessment);
+
+		const iterationRecord: LoopIterationRecord = {
+			iteration,
+			stagedOutputPath: path.relative(rootDir, iterationPaths.stagedOutputPath),
+			coveragePath: path.relative(rootDir, iterationPaths.coveragePath),
+			findingsPath: path.relative(rootDir, iterationPaths.findingsPath),
+			generatorMetadataPath: path.relative(rootDir, iterationPaths.generatorMetadataPath),
+			coveredRequirements: generated.coveredRequirements,
+			ambiguousRequirements: generated.ambiguousRequirements ?? [],
+			findingCategories: uniq(assessment.findings.map((finding) => finding.category)),
+			verdict: assessment.verdict,
+			summary: assessment.summary,
+			continueDecision: "continue",
+		};
+		state = await applyLoopState({ ...ctx, pi }, {
+			...state,
+			status: assessment.verdict === "pass" ? "promoting" : loopMode === "ask-each-round" ? "awaiting-user" : "assessing",
+			lastSummary: assessment.summary,
+			lastFindings: assessment.findings,
+			iterations: [...state.iterations, iterationRecord],
+			updatedAt: new Date().toISOString(),
+		});
+		await setLoopWidget(ctx, state);
+
+		previousTestCode = generated.testCode;
+		previousAssessment = assessment;
+
+		if (assessment.findings.length === 0) {
+			accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
+			state.iterations[state.iterations.length - 1].continueDecision = "accept";
+			state = await applyLoopState({ ...ctx, pi }, {
+				...state,
+				status: "promoting",
+				stopReason: "no-findings-remaining",
+				lastSummary: assessment.summary || "No remaining findings.",
+				updatedAt: new Date().toISOString(),
+			});
+			break;
+		}
+
+		notify(ctx, `TDD loop round ${iteration}: ${assessment.findings.length} finding(s)`, "warning");
+		if (loopMode === "ask-each-round" && ctx.hasUI && typeof ctx.ui.select === "function") {
+			const choice = await ctx.ui.select("Current generated tests still have findings:", ["Continue fixing", "Accept current staged tests", "Cancel loop"]);
+			if (!choice || choice === "Cancel loop") {
+				state.iterations[state.iterations.length - 1].continueDecision = "stop";
+				state = await applyLoopState({ ...ctx, pi }, {
+					...state,
+					status: "cancelled",
+					stopReason: "cancelled",
+					updatedAt: new Date().toISOString(),
+				});
+				await writeJson(loopSummaryPath, state);
+				await clearLoopState({ ...ctx, pi });
+				await setLoopWidget(ctx, undefined);
+				notify(ctx, "tdd-plan loop cancelled", "info");
+				return;
+			}
+			if (choice === "Accept current staged tests") {
+				accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
+				state.iterations[state.iterations.length - 1].continueDecision = "accept";
+				state = await applyLoopState({ ...ctx, pi }, {
+					...state,
+					status: "promoting",
+					stopReason: "user-accepted-current-output",
+					updatedAt: new Date().toISOString(),
+				});
+				break;
+			}
+		}
+
+		if (iteration === LOOP_MAX_ITERATIONS) {
+			accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
+			state.iterations[state.iterations.length - 1].continueDecision = "stop";
+			state = await applyLoopState({ ...ctx, pi }, {
+				...state,
+				status: "promoting",
+				stopReason: "safety-cap-reached",
+				updatedAt: new Date().toISOString(),
+			});
+			break;
+		}
+	}
+
+	if (!accepted) {
+		state = await applyLoopState({ ...ctx, pi }, {
+			...state,
+			status: "failed",
+			stopReason: state.stopReason ?? "assessment-failed",
+			updatedAt: new Date().toISOString(),
+		});
+		await writeJson(loopSummaryPath, state);
+		await clearLoopState({ ...ctx, pi });
+		await setLoopWidget(ctx, undefined);
+		notify(ctx, "tdd-plan loop failed to produce an accepted staged result.", "error");
+		return;
+	}
+
+	await ensureDir(finalOutputPath);
+	const finalCode = accepted.generated.testCode.endsWith("\n") ? accepted.generated.testCode : accepted.generated.testCode + "\n";
+	await fs.writeFile(finalOutputPath, finalCode, "utf8");
+	await writeJson(coveragePath, {
+		planPath: path.relative(rootDir, planPath),
+		framework: accepted.generated.framework,
+		outputPath: path.relative(rootDir, finalOutputPath),
+		requirements: requirements.map((r) => ({ text: r.text, heading: r.heading ?? null })),
+		coveredRequirements: accepted.generated.coveredRequirements,
+		ambiguousRequirements: accepted.generated.ambiguousRequirements ?? [],
+		notes: accepted.generated.notes ?? [],
+		loopMode,
+		iterations: state.iterations,
+		finalStopReason: state.stopReason,
+		promotedFrom: path.relative(rootDir, accepted.stagedOutputPath),
+		generatedAt: new Date().toISOString(),
+	});
+
+	const ambiguous = accepted.generated.ambiguousRequirements ?? [];
+	if (ambiguous.length > 0) {
+		await ensureDir(ambiguousPath);
+		const body =
+			`# Ambiguous requirements\n\nGenerated from: ${path.relative(rootDir, planPath)}\n\n` +
+			ambiguous.map((item) => `- ${item}`).join("\n") +
+			"\n";
+		await fs.writeFile(ambiguousPath, body, "utf8");
+	} else if (await exists(ambiguousPath)) {
+		await fs.rm(ambiguousPath, { force: true });
+	}
+
+	if (runTests) await runGeneratedTests(pi, rootDir, finalOutputPath, accepted.generated.framework, framework);
+
+	state = await applyLoopState({ ...ctx, pi }, {
+		...state,
+		active: false,
+		status: "completed",
+		finalOutputPath: path.relative(rootDir, finalOutputPath),
+		updatedAt: new Date().toISOString(),
+	});
+	await writeJson(loopSummaryPath, state);
+	await clearLoopState({ ...ctx, pi });
+	await setLoopWidget(ctx, undefined);
+
+	notify(ctx, `Generated TDD tests: ${path.relative(rootDir, finalOutputPath)}`, "info");
+	notify(ctx, `Loop stop reason: ${state.stopReason ?? "completed"}`, state.stopReason === "no-findings-remaining" ? "info" : "warning");
+	if (state.lastFindings?.length) notify(ctx, `Final round findings preserved: ${state.lastFindings.length}`, "warning");
+}
+
 export const __testables = {
 	systemPrompt: SYSTEM_PROMPT,
+	assessorSystemPrompt: ASSESSOR_SYSTEM_PROMPT,
 	detectFramework,
 	getConfigTestEntries,
 	inferTestDirectoriesFromText,
@@ -818,174 +1796,149 @@ export const __testables = {
 	choosePreferredTestDirectory,
 	buildDiscoveryAwareOutputPath,
 	pickDefaultOutputPath,
+	parseTddPlanArgs,
+	detectSuperficialPatterns,
+	tokenizeRequirementText,
+	requirementCoverageMatches,
+	detectCoverageGaps,
+	buildLoopIterationPaths,
+	getLoopState,
+	loadPersistedLoopState,
+	applyLoopState,
+	clearLoopState,
+	setLoopWidget,
+	restoreLoopStateOnEvent,
+	startAssessmentIsolationBranch,
+	returnFromAssessmentIsolationBranch,
+	LOOP_MAX_ITERATIONS,
 };
 
 export default function tddPlanExtension(pi: ExtensionAPI) {
+	pi.on?.("session_start", async (_event, ctx) => {
+		await restoreLoopStateOnEvent(ctx);
+	});
+	pi.on?.("session_switch", async (_event, ctx) => {
+		await restoreLoopStateOnEvent(ctx);
+	});
+	pi.on?.("session_tree", async (_event, ctx) => {
+		await restoreLoopStateOnEvent(ctx);
+	});
+
+	const runCommand = async (args: string | undefined, ctx: ExtensionContext, directLoopCommand: boolean) => {
+		let rawArgs = (args ?? "").trim();
+		if (!rawArgs && ctx.hasUI) {
+			const input = await ctx.ui.input("Markdown plan path", "specs/feature.md");
+			if (!input?.trim()) {
+				notify(ctx, directLoopCommand ? "tdd-plan-loop cancelled" : "tdd-plan cancelled", "info");
+				return;
+			}
+			rawArgs = input.trim();
+		}
+
+		const parsedArgs = parseTddPlanArgs(rawArgs);
+		if (!parsedArgs.planInput) {
+			notify(ctx, `Usage: /${directLoopCommand ? "tdd-plan-loop" : "tdd-plan"} <plan.md> [--run]`, "warning");
+			return;
+		}
+
+		let loopMode = parsedArgs.loopMode;
+		if (directLoopCommand && !loopMode) {
+			const selected = await chooseLoopModeAtStart(ctx, true);
+			if (!selected) {
+				notify(ctx, "tdd-plan-loop cancelled", "info");
+				return;
+			}
+			loopMode = selected === "single-pass" ? "ask-each-round" : selected;
+		}
+		if (!directLoopCommand && !loopMode) {
+			const selected = await chooseLoopModeAtStart(ctx, false);
+			if (!selected) {
+				notify(ctx, "tdd-plan cancelled", "info");
+				return;
+			}
+			if (selected !== "single-pass") loopMode = selected;
+		}
+
+		let prepared: Awaited<ReturnType<typeof prepareGenerationContext>>;
+		try {
+			prepared = await prepareGenerationContext(ctx, parsedArgs.planInput);
+		} catch (error) {
+			if ((error as Error).message === "cancelled") {
+				notify(ctx, directLoopCommand ? "tdd-plan-loop cancelled" : "tdd-plan cancelled", "info");
+				return;
+			}
+			notify(ctx, (error as Error).message, /not found/i.test((error as Error).message) ? "error" : "warning");
+			return;
+		}
+
+		if (prepared.requirements.length === 0) {
+			notify(ctx, "No bullet/numbered requirements found. Refine the plan so tests can map to concrete criteria.", "warning");
+		}
+
+		try {
+			await assertModelReady(ctx);
+		} catch (error) {
+			notify(ctx, (error as Error).message, "error");
+			return;
+		}
+
+		if (prepared.planText.length > MAX_PLAN_CHARS) {
+			notify(
+				ctx,
+				`Plan is large (${prepared.planText.length.toLocaleString()} chars). Sending a section-aware condensed version to the model to avoid stalls.`,
+				"warning",
+			);
+		}
+
+		if (loopMode) {
+			await runTddPlanLoop(pi, ctx, prepared, loopMode, parsedArgs.runTests);
+			return;
+		}
+
+		await generateSinglePass(pi, ctx, prepared, parsedArgs.runTests);
+	};
+
 	pi.registerCommand("tdd-plan", {
 		description: "Generate TypeScript TDD tests from a markdown plan file",
 		handler: async (args, ctx) => {
-			let rawArgs = (args ?? "").trim();
-			if (!rawArgs && ctx.hasUI) {
-				const input = await ctx.ui.input("Markdown plan path", "specs/feature.md");
-				if (!input?.trim()) {
-					notify(ctx, "tdd-plan cancelled", "info");
-					return;
-				}
-				rawArgs = input.trim();
-			}
+			await runCommand(args, ctx, false);
+		},
+	});
 
-			if (!rawArgs) {
-				notify(ctx, "Usage: /tdd-plan <plan.md> [--run]", "warning");
+	pi.registerCommand("tdd-plan-loop", {
+		description: "Generate TypeScript TDD tests from a markdown plan file using an iterative review loop",
+		handler: async (args, ctx) => {
+			await runCommand(args, ctx, true);
+		},
+	});
+
+	pi.registerCommand("tdd-plan-status", {
+		description: "Show current tdd-plan loop status",
+		handler: async (_args, ctx) => {
+			const state = getLoopState(ctx) ?? loadPersistedLoopState(ctx);
+			if (!state?.active) {
+				notify(ctx, "No active tdd-plan loop.", "warning");
 				return;
 			}
-
-			const runTests = rawArgs.includes("--run");
-			const cleaned = rawArgs.replace(/\s--run\b|^--run\b/g, "").trim();
-			const planPath = path.resolve(ctx.cwd, cleaned);
-
-			if (!(await exists(planPath))) {
-				notify(ctx, `Plan file not found: ${planPath}`, "error");
-				return;
+			const body = [
+				`# TDD plan loop status`,
+				"",
+				`- plan path: ${state.planPath}`,
+				`- loop mode: ${state.loopMode}`,
+				`- status: ${state.status}`,
+				`- iteration: ${state.iteration}/${state.maxIterations}`,
+				`- final output path: ${state.finalOutputPath ?? "(pending)"}`,
+				`- staged output path: ${state.stagedOutputPath ?? "(none yet)"}`,
+				`- assessment isolation: ${state.assessmentIsolationMode ?? "none"}`,
+				`- assessment session id: ${state.assessmentSessionId ?? "(none)"}`,
+				`- stop reason: ${state.stopReason ?? "(not stopped)"}`,
+				`- last summary: ${state.lastSummary ?? "(none)"}`,
+				`- iterations recorded: ${state.iterations.length}`,
+			].join("\n");
+			if (typeof pi.sendMessage === "function") {
+				pi.sendMessage({ customType: "tdd-plan-status", content: body, display: true }, { triggerTurn: false });
 			}
-
-			const planText = await fs.readFile(planPath, "utf8");
-			const requirements = extractRequirements(planText);
-			if (requirements.length === 0) {
-				notify(ctx, "No bullet/numbered requirements found. Refine the plan so tests can map to concrete criteria.", "warning");
-			}
-
-			const pkg = await loadPackageJson(ctx.cwd);
-			const rootDir = pkg ? path.dirname(pkg.path) : ctx.cwd;
-			const framework = detectFramework(pkg?.data ?? null);
-			const repoScan = await runWithLoader(ctx, "Inspecting repository for local test conventions...", async () =>
-				inspectRepo(rootDir, pkg?.data ?? null, framework),
-			);
-			if (repoScan.cancelled) {
-				notify(ctx, "tdd-plan cancelled", "info");
-				return;
-			}
-			if (repoScan.error || !repoScan.result) {
-				notify(ctx, "Failed to inspect repository context for tdd-plan.", "error");
-				return;
-			}
-			const repoContext = repoScan.result;
-			const suggestedOutput = buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext);
-
-			if (!ctx.model) {
-				notify(ctx, "No active model selected. Select a model first, then run /tdd-plan again.", "error");
-				return;
-			}
-
-			const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-			if (!apiKey) {
-				notify(ctx, "The active model has no API key/session available. Authenticate first, then run /tdd-plan again.", "error");
-				return;
-			}
-
-			if (planText.length > MAX_PLAN_CHARS) {
-				notify(ctx, 
-					`Plan is large (${planText.length.toLocaleString()} chars). Sending a section-aware condensed version to the model to avoid stalls.`,
-					"warning",
-				);
-			}
-
-			const generation = await runWithLoader(ctx, `Generating TDD tests using ${ctx.model.id}...`, (signal) =>
-				generateWithModel(
-					ctx,
-					framework,
-					path.relative(rootDir, planPath),
-					planText,
-					requirements,
-					suggestedOutput,
-					repoContext,
-					signal,
-				),
-			);
-			if (generation.cancelled) {
-				notify(ctx, "tdd-plan cancelled", "info");
-				return;
-			}
-			if (generation.error) {
-				notify(ctx, "AI test generation failed. Try again with the active model, or switch models and retry.", "error");
-				return;
-			}
-			const generated = generation.result;
-			if (!generated) {
-				notify(ctx, "AI test generation failed. Try again with the active model, or switch models and retry.", "error");
-				return;
-			}
-
-			const outputPath = pickDefaultOutputPath(rootDir, planPath, repoContext, generated.outputPath || suggestedOutput);
-			const coveragePath = path.join(rootDir, ".pi", "generated-tdd", `${slugify(path.basename(planPath))}.coverage.json`);
-			const ambiguousPath = path.join(rootDir, ".pi", "generated-tdd", `${slugify(path.basename(planPath))}.ambiguous.md`);
-
-			if (await exists(outputPath) && ctx.hasUI) {
-				const overwrite = await ctx.ui.confirm("Overwrite generated test file?", outputPath);
-				if (!overwrite) {
-					notify(ctx, "tdd-plan cancelled", "info");
-					return;
-				}
-			}
-
-			await ensureDir(outputPath);
-			await fs.writeFile(outputPath, generated.testCode.endsWith("\n") ? generated.testCode : generated.testCode + "\n", "utf8");
-			await writeJson(coveragePath, {
-				planPath: path.relative(rootDir, planPath),
-				framework: generated.framework,
-				outputPath: path.relative(rootDir, outputPath),
-				repoContext: {
-					testDirectories: repoContext.testDirectories,
-					testNamingPatterns: repoContext.testNamingPatterns,
-					testConfigDirectories: repoContext.testConfigDirectories,
-					testConfigPatterns: repoContext.testConfigPatterns,
-					testScriptDirectories: repoContext.testScriptDirectories,
-					testScriptPatterns: repoContext.testScriptPatterns,
-					sourceDirectories: repoContext.sourceDirectories,
-					hasTestingLibrary: repoContext.hasTestingLibrary,
-					hasPlaywright: repoContext.hasPlaywright,
-					hasNodeEnvironment: repoContext.hasNodeEnvironment,
-					hasReact: repoContext.hasReact,
-				},
-				requirements: requirements.map((r) => ({ text: r.text, heading: r.heading ?? null })),
-				coveredRequirements: generated.coveredRequirements,
-				ambiguousRequirements: generated.ambiguousRequirements ?? [],
-				notes: generated.notes ?? [],
-				generatedAt: new Date().toISOString(),
-			});
-
-			const ambiguous = generated.ambiguousRequirements ?? [];
-			if (ambiguous.length > 0) {
-				await ensureDir(ambiguousPath);
-				const body =
-					`# Ambiguous requirements\n\nGenerated from: ${path.relative(rootDir, planPath)}\n\n` +
-					ambiguous.map((item) => `- ${item}`).join("\n") +
-					"\n";
-				await fs.writeFile(ambiguousPath, body, "utf8");
-			} else if (await exists(ambiguousPath)) {
-				await fs.rm(ambiguousPath, { force: true });
-			}
-
-			if (runTests) {
-				let command: string | null = null;
-				if (generated.framework === "vitest" || framework === "vitest") {
-					command = `npx vitest run ${JSON.stringify(path.relative(rootDir, outputPath))}`;
-				} else if (generated.framework === "jest" || framework === "jest") {
-					command = `npx jest ${JSON.stringify(path.relative(rootDir, outputPath))}`;
-				}
-				if (command) {
-					const result = await pi.exec("bash", ["-lc", `cd ${JSON.stringify(rootDir)} && ${command}`]);
-					if (result.code === 0) notify(ctx, "Generated tests already pass", "info");
-					else notify(ctx, "Generated tests executed", "info");
-				}
-			}
-
-			notify(ctx, `Generated TDD tests: ${path.relative(rootDir, outputPath)}`, "info");
-			if (repoContext.testFileExamples.length > 0) {
-				notify(ctx, `Matched local test conventions from ${repoContext.testFileExamples.length} example file(s)`, "info");
-			}
-			if (ambiguous.length > 0) {
-				notify(ctx, `Ambiguous requirements flagged: ${ambiguous.length}`, "warning");
-			}
+			notify(ctx, "TDD plan loop status shown.", "info");
 		},
 	});
 }
