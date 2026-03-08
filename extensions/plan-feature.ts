@@ -66,6 +66,9 @@ let activePlanningState: PlanningSessionState | undefined;
 let lastPersistedStateJson: string | undefined;
 let lastPersistedDraftJson: string | undefined;
 
+let writeFileImpl = fs.writeFile.bind(fs);
+let mkdirImpl = fs.mkdir.bind(fs);
+
 function slugify(input: string): string {
 	return input
 		.toLowerCase()
@@ -267,12 +270,47 @@ async function restorePlanningStateOnEvent(ctx: any, _event: any): Promise<Plann
 	return undefined;
 }
 
+function hasUnsavedDraft(state: PlanningSessionState | undefined): boolean {
+	if (!state?.active) return false;
+	if (!state.currentDraft) return false;
+	return !state.savedPath;
+}
+
 async function endPlanningSession(ctx: any): Promise<void> {
 	const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 	const originId = state?.originId;
 	if (!state?.active || !originId) {
 		notify(ctx, "No active planning session.", "warning");
 		throw new Error("No active planning session");
+	}
+
+	if (hasUnsavedDraft(state) && ctx?.hasUI && typeof ctx?.ui?.select === "function") {
+		const choice = await ctx.ui.select("You have an unsaved plan:", ["Save plan", "Discard plan"]);
+		if (choice === undefined) {
+			notify(ctx, "end-planning cancelled", "info");
+			return;
+		}
+		if (choice === "Save plan") {
+			const relativePath = path.join(".pi", "plans", `${state.slug}.plan.md`);
+			const absolutePath = path.resolve(state.repoRoot, relativePath);
+			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
+			await writeFileImpl(absolutePath, state.currentDraft.endsWith("\n") ? state.currentDraft : `${state.currentDraft}\n`, "utf8");
+			const savedPath = path.relative(state.repoRoot, absolutePath);
+			const nextState: PlanningSessionState = {
+				...state,
+				savedPath,
+				status: "finalized",
+				updatedAt: new Date().toISOString(),
+			};
+			appendCustomEntry(ctx.pi ?? ctx, PLANNING_METADATA_TYPE, {
+				id: state.id,
+				slug: state.slug,
+				savedPath,
+				updatedAt: nextState.updatedAt,
+			});
+			await applyPlanningState(ctx, nextState);
+			notify(ctx, `Plan saved: ${savedPath}`);
+		}
 	}
 
 	if (typeof ctx.navigateTree === "function") await ctx.navigateTree(originId, { summarize: false });
@@ -596,6 +634,7 @@ export const __testables = {
 	setPlanningWidget,
 	startPlanningSession,
 	restorePlanningStateOnEvent,
+	hasUnsavedDraft,
 	endPlanningSession,
 	handlePlanTests,
 	buildPlanningSystemPrompt,
@@ -611,6 +650,18 @@ export const __testables = {
 	synthesizePlanFromState,
 	maybeExtractDraftFromMessage,
 	shouldCaptureDraftUpdate,
+	get __fsWriteFile() {
+		return writeFileImpl;
+	},
+	set __fsWriteFile(value) {
+		writeFileImpl = value;
+	},
+	get __fsMkdir() {
+		return mkdirImpl;
+	},
+	set __fsMkdir(value) {
+		mkdirImpl = value;
+	},
 };
 
 export default function planFeatureExtension(pi: ExtensionAPI) {
@@ -761,8 +812,8 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			}
 			const relativePath = (args ?? "").trim() || path.join(".pi", "plans", `${state.slug}.plan.md`);
 			const absolutePath = path.resolve(state.repoRoot, relativePath);
-			await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-			await fs.writeFile(absolutePath, draft.endsWith("\n") ? draft : `${draft}\n`, "utf8");
+			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
+			await writeFileImpl(absolutePath, draft.endsWith("\n") ? draft : `${draft}\n`, "utf8");
 			const savedPath = path.relative(state.repoRoot, absolutePath);
 			const nextState: PlanningSessionState = {
 				...state,

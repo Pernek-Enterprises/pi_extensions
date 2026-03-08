@@ -284,6 +284,107 @@ test("End behavior when no active planning session exists notifies 'no active pl
 	assert.ok(notifications.some((message) => /no active planning session/i.test(message)));
 });
 
+test("end-planning detects an unsaved plan and lets the user save it before returning", async () => {
+	const navigations: Array<{ id: string; options: unknown }> = [];
+	const notifications: string[] = [];
+	const writes: string[] = [];
+	const ctx = {
+		hasUI: true,
+		state: {
+			planning: {
+				active: true,
+				originId: "origin-88",
+				id: "plan-1",
+				title: "Plan",
+				slug: "plan",
+				originalInput: "Plan",
+				status: "finalized",
+				repoRoot: "/repo",
+				createdAt: "2025-01-01T00:00:00.000Z",
+				updatedAt: "2025-01-01T00:00:00.000Z",
+				relevantFiles: [],
+				questions: [],
+				assumptions: [],
+				decisions: [],
+				currentDraft: "# Plan: Plan\n",
+			},
+		},
+		ui: {
+			async select() {
+				return "Save plan";
+			},
+			clearWidget() {},
+		},
+		pi: {
+			appendEntry() {
+				return { id: "entry-1" };
+			},
+		},
+		navigateTree(id: string, options: unknown) {
+			navigations.push({ id, options });
+		},
+		notify(message: string) {
+			notifications.push(message);
+		},
+	};
+
+	const originalWriteFile = __testables.__fsWriteFile;
+	const originalMkdir = __testables.__fsMkdir;
+	__testables.__fsWriteFile = async (filePath: string) => {
+		writes.push(filePath);
+	};
+	__testables.__fsMkdir = async () => {};
+	try {
+		await __testables.endPlanningSession(ctx);
+	} finally {
+		__testables.__fsWriteFile = originalWriteFile;
+		__testables.__fsMkdir = originalMkdir;
+	}
+
+	assert.ok(writes.some((file) => file.endsWith(".pi/plans/plan.plan.md")));
+	assert.ok(notifications.some((message) => /Plan saved:/i.test(message)));
+	assert.deepEqual(navigations, [{ id: "origin-88", options: { summarize: false } }]);
+});
+
+test("end-planning detects an unsaved plan and lets the user discard it before returning", async () => {
+	const navigations: Array<{ id: string; options: unknown }> = [];
+	const ctx = {
+		hasUI: true,
+		state: {
+			planning: {
+				active: true,
+				originId: "origin-99",
+				id: "plan-1",
+				title: "Plan",
+				slug: "plan",
+				originalInput: "Plan",
+				status: "finalized",
+				repoRoot: "/repo",
+				createdAt: "2025-01-01T00:00:00.000Z",
+				updatedAt: "2025-01-01T00:00:00.000Z",
+				relevantFiles: [],
+				questions: [],
+				assumptions: [],
+				decisions: [],
+				currentDraft: "# Plan: Plan\n",
+			},
+		},
+		ui: {
+			async select() {
+				return "Discard plan";
+			},
+			clearWidget() {},
+		},
+		navigateTree(id: string, options: unknown) {
+			navigations.push({ id, options });
+		},
+		notify() {},
+	};
+
+	await __testables.endPlanningSession(ctx);
+	assert.deepEqual(navigations, [{ id: "origin-99", options: { summarize: false } }]);
+});
+
 test("/plan-tests ensure a saved plan file exists and if not saved yet, prompt to save first", async () => {
 	const prompts: string[] = [];
 	const ctx = {
