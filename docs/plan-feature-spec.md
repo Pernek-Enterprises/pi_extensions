@@ -488,6 +488,11 @@ Required sections:
 ```md
 # Plan: <title>
 
+## Recommended Split
+- Only include when the feature should clearly be delivered in multiple smaller vertical slices
+- Each split must be a full end-to-end slice of user value
+- Never split by frontend/backend layers
+
 ## Requested feature
 <original brief>
 
@@ -515,11 +520,6 @@ Required sections:
 ## Open questions
 - unresolved item
 
-## Implementation plan
-1. step
-2. step
-3. step
-
 ## Acceptance criteria
 - concrete behavior
 - concrete behavior
@@ -527,10 +527,6 @@ Required sections:
 ## Edge cases
 - edge case
 - failure mode
-
-## Test ideas
-- test idea
-- test idea
 ```
 
 Optional sections if relevant:
@@ -551,11 +547,11 @@ This extension is the upstream planning stage for the existing `tdd-plan` extens
 ### Output design constraints
 The saved markdown should be written so `tdd-plan` can extract useful requirements from:
 
+- `## Recommended Split` (when present)
 - `## Scope`
 - `## Clarified decisions`
 - `## Acceptance criteria`
 - `## Edge cases`
-- `## Test ideas`
 
 ### Recommendation
 Favor bullet lists for these sections, because `tdd-plan.ts` already extracts bullet and numbered requirements.

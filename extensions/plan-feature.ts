@@ -44,16 +44,15 @@ type PlanMarkdownInput = {
 	title: string;
 	originalInput: string;
 	repoContextSummary?: string;
+	recommendedSplit?: string[];
 	problemStatement?: string;
 	scope?: string[];
 	outOfScope?: string[];
 	decisions?: string[];
 	assumptions?: string[];
 	openQuestions?: string[];
-	implementationPlan?: string[];
 	acceptanceCriteria?: string[];
 	edgeCases?: string[];
-	testIdeas?: string[];
 };
 
 const PLANNING_STATE_TYPE = "planning-session";
@@ -339,6 +338,8 @@ function buildPlanningSystemPrompt(): string {
 		"Do not invent architecture unsupported by the repository or ask giant questionnaires.",
 		"If critical blockers remain unclear, call them out before finalizing.",
 		"Consider performance, rollout strategy, audit logging, analytics, and observability when relevant.",
+		"Only include a Recommended Split section when splitting the feature into multiple smaller vertical slices would clearly improve delivery.",
+		"If you include Recommended Split, every split must be a full vertical slice delivering end-to-end value; never split by frontend/backend layers.",
 		"Produce structured markdown when enough is known.",
 	].join(" ");
 }
@@ -358,6 +359,13 @@ function renderPlanMarkdown(input: PlanMarkdownInput): string {
 	const parts = [
 		`# Plan: ${input.title}`,
 		"",
+	];
+
+	if ((input.recommendedSplit?.filter(Boolean) ?? []).length > 0) {
+		parts.push(section("Recommended Split", input.recommendedSplit), "");
+	}
+
+	parts.push(
 		"## Requested feature",
 		input.originalInput,
 		"",
@@ -377,14 +385,10 @@ function renderPlanMarkdown(input: PlanMarkdownInput): string {
 		"",
 		section("Open questions", input.openQuestions),
 		"",
-		section("Implementation plan", input.implementationPlan, true),
-		"",
 		section("Acceptance criteria", input.acceptanceCriteria),
 		"",
 		section("Edge cases", input.edgeCases),
-		"",
-		section("Test ideas", input.testIdeas),
-	];
+	);
 	return parts.join("\n").trim() + "\n";
 }
 
@@ -568,36 +572,34 @@ async function collectPlanningContext(ctx: any, input: string): Promise<Partial<
 function synthesizePlanFromState(state: PlanningSessionState): string {
 	const openQuestions = state.questions.filter((question) => question.status === "open").map((question) => question.question);
 	const scope = state.relevantFiles.slice(0, 4).map((file) => `Review and update ${file.path}`);
-	const implementationPlan = [
-		"Confirm remaining feature decisions with the user.",
-		"Implement the smallest repo-aligned changes needed for the feature.",
-		"Add or update tests near the affected modules.",
-		"Validate behavior against the acceptance criteria before finishing.",
-	];
+	const recommendedSplit = scope.length > 2
+		? [
+			"Slice 1: deliver the smallest end-to-end version of the feature for a single primary user flow.",
+			"Slice 2: add the next user-visible capability or supporting variant on top of slice 1.",
+		]
+		: undefined;
 	const acceptanceCriteria = [
 		"The feature behavior is documented in repo-grounded terms.",
-		"The implementation plan cites affected modules or explicitly notes when no prior module exists.",
-		"Test ideas cover the primary flow and at least one edge case.",
+		"The plan cites affected modules or explicitly notes when no prior module exists.",
+		"Acceptance criteria cover the primary user-visible flow and at least one edge case.",
 	];
 	const edgeCases = [
 		"No obvious existing module is found for the request.",
 		"Critical behavior remains ambiguous and needs clarification before implementation.",
 	];
-	const testIdeas = state.relevantFiles.filter((file) => /test|spec|__tests__/i.test(file.path)).map((file) => `Extend tests around ${file.path}`);
 	return renderPlanMarkdown({
 		title: state.title,
 		originalInput: state.originalInput,
 		repoContextSummary: state.repoContextSummary,
+		recommendedSplit,
 		problemStatement: `Add ${state.title} in a way that fits the existing repository structure and conventions.`,
 		scope,
 		outOfScope: ["Unconfirmed product changes beyond the requested feature"],
 		decisions: state.decisions,
 		assumptions: state.assumptions.length > 0 ? state.assumptions : ["Reuse existing project conventions unless clarified otherwise."],
 		openQuestions,
-		implementationPlan,
 		acceptanceCriteria,
 		edgeCases,
-		testIdeas,
 	});
 }
 
@@ -616,7 +618,7 @@ function extractAssistantText(message: any): string {
 function maybeExtractDraftFromMessage(message: any): string | undefined {
 	const text = extractAssistantText(message).trim();
 	if (!text) return undefined;
-	if (/^# Plan:/m.test(text) || (/^## Requested feature$/m.test(text) && /^## Implementation plan$/m.test(text))) return text;
+	if (/^# Plan:/m.test(text) || (/^## Requested feature$/m.test(text) && /^## Acceptance criteria$/m.test(text))) return text;
 	return undefined;
 }
 

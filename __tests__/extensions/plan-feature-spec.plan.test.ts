@@ -455,13 +455,16 @@ test("buildPlanningSystemPrompt requires the agent to cite repo evidence explici
 	assert.doesNotMatch(prompt, /jump immediately into coding/i);
 });
 
-test("buildPlanningSystemPrompt includes important constraints for performance, rollout strategy, audit/logging, analytics, and observability", () => {
+test("buildPlanningSystemPrompt includes important constraints for performance, rollout strategy, audit/logging, analytics, observability, and vertical-slice split guidance", () => {
 	const prompt = __testables.buildPlanningSystemPrompt();
 	assert.match(prompt, /performance/i);
 	assert.match(prompt, /rollout/i);
 	assert.match(prompt, /audit|logging/i);
 	assert.match(prompt, /analytics/i);
 	assert.match(prompt, /observability/i);
+	assert.match(prompt, /recommended split/i);
+	assert.match(prompt, /vertical slice/i);
+	assert.match(prompt, /never split by frontend\/backend|never split by frontend\/backend layers/i);
 });
 
 test("buildFinalizationPrompt for /plan-done asks the agent to stop questioning and finalize the plan", () => {
@@ -470,28 +473,45 @@ test("buildFinalizationPrompt for /plan-done asks the agent to stop questioning 
 	assert.match(prompt, /suggest \/plan-save/i);
 });
 
-test("final plan markdown output includes ## Scope, ## Clarified decisions, ## Acceptance criteria, ## Edge cases, and ## Test ideas", () => {
+test("final plan markdown output includes Recommended Split conditionally and keeps scope/decisions/acceptance/edge cases", () => {
 	const markdown = __testables.renderPlanMarkdown({
 		title: "Add recurring invoices",
 		originalInput: "Add recurring invoices",
 		repoContextSummary: "Found invoice modules and tests.",
+		recommendedSplit: [
+			"Slice 1: create a recurring invoice for one supported schedule end-to-end.",
+			"Slice 2: add pause/resume for active recurring invoices end-to-end.",
+		],
 		scope: ["Create recurring invoices"],
 		outOfScope: ["Email reminders"],
 		decisions: ["Only standard invoices in v1"],
 		assumptions: ["Existing billing scheduler can be reused"],
 		openQuestions: ["Should pause/resume emit audit logs?"],
-		implementationPlan: ["Add recurrence model", "Update UI", "Add tests"],
 		acceptanceCriteria: ["Users can pause an active recurring invoice"],
 		edgeCases: ["Resuming recalculates next run date"],
-		testIdeas: ["pause/resume flow preserves audit trail"],
 	});
 
 	assert.match(markdown, /^# Plan: Add recurring invoices/m);
+	assert.match(markdown, /^## Recommended Split$/m);
 	assert.match(markdown, /^## Scope$/m);
 	assert.match(markdown, /^## Clarified decisions$/m);
 	assert.match(markdown, /^## Acceptance criteria$/m);
 	assert.match(markdown, /^## Edge cases$/m);
-	assert.match(markdown, /^## Test ideas$/m);
+	assert.doesNotMatch(markdown, /^## Implementation plan$/m);
+	assert.doesNotMatch(markdown, /^## Test ideas$/m);
+});
+
+test("final plan markdown output omits Recommended Split when not provided", () => {
+	const markdown = __testables.renderPlanMarkdown({
+		title: "Add recurring invoices",
+		originalInput: "Add recurring invoices",
+		repoContextSummary: "Found invoice modules and tests.",
+		scope: ["Create recurring invoices"],
+		acceptanceCriteria: ["Users can pause an active recurring invoice"],
+		edgeCases: ["Resuming recalculates next run date"],
+	});
+
+	assert.doesNotMatch(markdown, /^## Recommended Split$/m);
 });
 
 test("repo root detection and package.json loading fall back to ctx.cwd when no repo root or package.json exists", async () => {
