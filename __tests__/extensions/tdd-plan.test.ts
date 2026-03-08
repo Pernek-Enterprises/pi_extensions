@@ -40,6 +40,97 @@ test("node --test fallback keeps TypeScript output when no explicit suffix is pr
 	assert.deepEqual(__testables.inferScriptTestPatterns(entries), [".test.ts"]);
 });
 
+test("classifyBehavioralHeading prioritizes goal and acceptance sections while excluding plan-metadata sections", () => {
+	assert.equal(__testables.classifyBehavioralHeading("Acceptance criteria"), "acceptance");
+	assert.equal(__testables.classifyBehavioralHeading("Requested feature"), "goal");
+	assert.equal(__testables.classifyBehavioralHeading("User story"), "goal");
+	assert.equal(__testables.classifyBehavioralHeading("Clarified decisions"), "decision");
+	assert.equal(__testables.classifyBehavioralHeading("Existing codebase context"), null);
+	assert.equal(__testables.classifyBehavioralHeading("Implementation plan"), null);
+	assert.equal(__testables.classifyBehavioralHeading("Behavior validation"), null);
+});
+
+test("collectBehavioralTargets extracts user-visible goals and ignores markdown-plan validation sections", () => {
+	const markdown = `# Plan: Frontend deploy workflow
+
+## Requested feature
+Create a GitHub Action that deploys the frontend to Cloudflare Pages.
+
+## Existing codebase context
+- src/app.tsx already builds the frontend bundle.
+
+## Acceptance criteria
+- pushes to main deploy the frontend to Cloudflare Pages
+- pull requests run a non-production validation build
+
+## Edge cases
+- deployment is skipped when Cloudflare credentials are missing
+
+## Implementation plan
+- create .github/workflows/frontend-deploy.yml
+
+## Test ideas
+- verify the plan includes primary flow and edge case headings
+`;
+
+	const requirements = [
+		{ heading: "Acceptance criteria", text: "pushes to main deploy the frontend to Cloudflare Pages" },
+		{ heading: "Acceptance criteria", text: "pull requests run a non-production validation build" },
+		{ heading: "Edge cases", text: "deployment is skipped when Cloudflare credentials are missing" },
+		{ heading: "Test ideas", text: "verify the plan includes primary flow and edge case headings" },
+	];
+
+	assert.deepEqual(__testables.collectBehavioralTargets(markdown, requirements), [
+		{
+			heading: "Requested feature",
+			text: "Create a GitHub Action that deploys the frontend to Cloudflare Pages.",
+			source: "goal",
+		},
+		{
+			heading: "Acceptance criteria",
+			text: "pushes to main deploy the frontend to Cloudflare Pages",
+			source: "acceptance",
+		},
+		{
+			heading: "Acceptance criteria",
+			text: "pull requests run a non-production validation build",
+			source: "acceptance",
+		},
+		{
+			heading: "Edge cases",
+			text: "deployment is skipped when Cloudflare credentials are missing",
+			source: "edge-case",
+		},
+	]);
+});
+
+test("collectBehavioralTargets keeps prose acceptance criteria while still excluding validation-only headings", () => {
+	const markdown = `# Plan: Notifications
+
+## User story
+As an admin, I can retry a failed notification from the dashboard.
+
+## Acceptance criteria
+Retrying a failed notification queues exactly one new delivery attempt and leaves the failed attempt in history.
+
+## Behavior validation
+- verify the plan mentions dashboard retry controls
+`;
+
+	assert.deepEqual(__testables.collectBehavioralTargets(markdown, []), [
+		{
+			heading: "User story",
+			text: "As an admin, I can retry a failed notification from the dashboard.",
+			source: "goal",
+		},
+		{
+			heading: "Acceptance criteria",
+			text: "Retrying a failed notification queues exactly one new delivery attempt and leaves the failed attempt in history.",
+			source: "acceptance",
+		},
+	]);
+});
+
 test("pickDefaultOutputPath ignores unsafe model output outside the repo", () => {
 	const rootDir = "/repo";
 	const planPath = "/repo/plans/feature.md";
@@ -188,4 +279,11 @@ test("choosePreferredTestPattern keeps TypeScript fallback for jest when no repo
 		}),
 		".test.ts",
 	);
+});
+
+test("system prompt explicitly forbids tests against plan markdown itself", () => {
+	assert.match(__testables.systemPrompt, /never write tests that assert on the plan file itself/i);
+	assert.match(__testables.systemPrompt, /markdown headings/i);
+	assert.match(__testables.systemPrompt, /documentation content/i);
+	assert.match(__testables.systemPrompt, /intended product or system behavior/i);
 });

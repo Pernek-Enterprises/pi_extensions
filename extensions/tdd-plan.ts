@@ -10,6 +10,12 @@ type Requirement = {
 	heading?: string;
 };
 
+type BehavioralTarget = {
+	text: string;
+	heading?: string;
+	source: "goal" | "acceptance" | "decision" | "scope" | "edge-case" | "other";
+};
+
 type MarkdownSection = {
 	index: number;
 	heading?: string;
@@ -55,7 +61,7 @@ type GeneratedSpec = {
 	notes?: string[];
 };
 
-const SYSTEM_PROMPT = `You generate TypeScript test files from markdown implementation plans.
+const SYSTEM_PROMPT = `You generate TypeScript acceptance tests from markdown implementation plans.
 
 Return strict JSON with this shape:
 {
@@ -69,16 +75,19 @@ Return strict JSON with this shape:
 
 Rules:
 - Generate ONLY tests, never implementation code.
+- Treat the markdown plan as a planning artifact, not as the system under test.
+- NEVER write tests that assert on the plan file itself, markdown headings, wording, checklist items, section presence, phrase matching, or any other documentation content.
+- The tests must validate the intended product or system behavior that the plan describes: the requested feature, acceptance criteria, clarified decisions, scope, edge cases, rollout constraints, and observable outcomes.
 - Use the repository context and existing examples to match local conventions closely.
 - Prefer Vitest when framework says vitest. Prefer Jest when framework says jest.
 - The file must be valid TypeScript.
-- The tests must be RED first: they should fail until the plan is actually implemented.
+- The tests must be RED first: they should fail until the real feature is actually implemented.
 - Do not use placeholder TODO comments as the primary failure mode; use executable expectations that fail until implementation exists, or explicit throw errors if the app wiring is impossible to infer.
-- For each testable requirement, create at least one named test whose title includes the requirement text or a close paraphrase.
+- For each testable behavioral requirement, create at least one named test whose title includes the requirement text or a close paraphrase.
 - Include a top comment saying the file was generated from a markdown plan.
 - Reuse local test idioms, imports, setup style, and folder conventions when examples are provided.
-- Favor the strongest realistic acceptance criteria you can infer from the plan and repository context.
-- If a requirement is vague, still create the best failing acceptance test you can, and list it in ambiguousRequirements.
+- Favor the strongest realistic acceptance criteria you can infer from the plan goal and repository context.
+- If a requirement is vague, still create the best failing behavioral acceptance test you can, and list it in ambiguousRequirements.
 - Return raw JSON only. No markdown fences.`;
 
 const MAX_PLAN_CHARS = 24_000;
@@ -247,18 +256,89 @@ function splitMarkdownSections(markdown: string): MarkdownSection[] {
 	}));
 }
 
-function buildPromptRequirements(requirements: Requirement[]): PromptRequirements {
-	if (requirements.length <= MAX_REQUIREMENTS_IN_PROMPT) {
+function classifyBehavioralHeading(heading?: string): BehavioralTarget["source"] | null {
+	if (!heading) return null;
+	const normalized = heading.toLowerCase();
+	if (/existing codebase context|implementation|approach|design|architecture|open questions|assumptions|test ideas?|qa|validation|recommended split/.test(normalized)) {
+		return null;
+	}
+	if (/acceptance|success criteria|definition of done/.test(normalized)) return "acceptance";
+	if (/requested feature|problem statement|user story|goal|objective/.test(normalized)) return "goal";
+	if (/edge cases?|failure|errors?|risks?|constraints?|non-goals?/.test(normalized)) return "edge-case";
+	if (/scope|api changes|data model changes|security|permissions|performance|rollout|migration|observability/.test(normalized)) return "scope";
+	if (/clarified decisions?|behavior|expected|outcomes?|requirements?/.test(normalized)) return "decision";
+	return "other";
+}
+
+function collectBehavioralTargets(markdown: string, requirements: Requirement[]): BehavioralTarget[] {
+	const sections = splitMarkdownSections(markdown);
+	const targets: BehavioralTarget[] = [];
+	const seen = new Set<string>();
+
+	const pushTarget = (text: string, heading: string | undefined, source: BehavioralTarget["source"]) => {
+		const normalizedText = text.replace(/\s+/g, " ").trim();
+		if (!normalizedText) return;
+		const key = `${heading ?? ""}::${normalizedText.toLowerCase()}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		targets.push({ text: normalizedText, heading, source });
+	};
+
+	for (const section of sections) {
+		const source = classifyBehavioralHeading(section.heading);
+		if (!source) continue;
+		const lines = section.content.split(/\r?\n/);
+		let capturedStructured = false;
+		for (const rawLine of lines) {
+			const line = rawLine.trim();
+			const bulletMatch = line.match(/^[-*+]\s+(?:\[[ xX]\]\s+)?(.+)$/);
+			const numberedMatch = line.match(/^\d+[.)]\s+(.+)$/);
+			const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
+			if (headingMatch) continue;
+			const item = bulletMatch?.[1] ?? numberedMatch?.[1];
+			if (!item) continue;
+			capturedStructured = true;
+			pushTarget(item, section.heading, source);
+		}
+		if (!capturedStructured && source !== "other") {
+			const paragraph = lines
+				.map((line) => line.trim())
+				.filter((line) => line && !/^#{1,6}\s+/.test(line))
+				.join(" ")
+				.trim();
+			if (paragraph) pushTarget(paragraph, section.heading, source);
+		}
+	}
+
+	for (const req of requirements) {
+		const source = classifyBehavioralHeading(req.heading);
+		if (!source) continue;
+		pushTarget(req.text, req.heading, source);
+	}
+
+	if (targets.length > 0) return targets;
+	return requirements.map((req) => ({
+		text: req.text,
+		heading: req.heading,
+		source: classifyBehavioralHeading(req.heading) ?? "other",
+	}));
+}
+
+function buildPromptRequirements(requirements: Requirement[], behavioralTargets: BehavioralTarget[]): PromptRequirements {
+	const promptItems = behavioralTargets.length > 0
+		? behavioralTargets.map((target) => ({ text: target.text, heading: target.heading, weight: getSectionPriority(target.heading) + (target.source === "acceptance" ? 3 : target.source === "goal" ? 2 : target.source === "edge-case" ? 2 : 0) }))
+		: requirements.map((req) => ({ text: req.text, heading: req.heading, weight: getSectionPriority(req.heading) }));
+
+	if (promptItems.length <= MAX_REQUIREMENTS_IN_PROMPT) {
 		return {
-			text: requirements.map((req, i) => `- ${i + 1}. ${req.heading ? `[${req.heading}] ` : ""}${req.text}`).join("\n"),
+			text: promptItems.map((req, i) => `- ${i + 1}. ${req.heading ? `[${req.heading}] ` : ""}${req.text}`).join("\n"),
 			omittedCount: 0,
 		};
 	}
 
-	const ranked = requirements.map((req, index) => {
-		const headingPriority = getSectionPriority(req.heading);
-		const tailBonus = index >= Math.floor(requirements.length * 0.75) ? 2 : index >= Math.floor(requirements.length * 0.5) ? 1 : 0;
-		return { req, index, score: headingPriority * 10 + tailBonus };
+	const ranked = promptItems.map((req, index) => {
+		const tailBonus = index >= Math.floor(promptItems.length * 0.75) ? 2 : index >= Math.floor(promptItems.length * 0.5) ? 1 : 0;
+		return { req, index, score: req.weight * 10 + tailBonus };
 	});
 
 	const selectedIndexes = new Set(
@@ -268,13 +348,13 @@ function buildPromptRequirements(requirements: Requirement[]): PromptRequirement
 			.map((item) => item.index),
 	);
 
-	const selected = requirements
+	const selected = promptItems
 		.map((req, index) => ({ req, index }))
 		.filter((item) => selectedIndexes.has(item.index));
 
 	return {
 		text: selected.map((item) => `- ${item.index + 1}. ${item.req.heading ? `[${item.req.heading}] ` : ""}${item.req.text}`).join("\n"),
-		omittedCount: requirements.length - selected.length,
+		omittedCount: promptItems.length - selected.length,
 	};
 }
 
@@ -525,7 +605,8 @@ async function generateWithModel(
 	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
 	if (!apiKey) return null;
 
-	const promptRequirements = buildPromptRequirements(requirements);
+	const behavioralTargets = collectBehavioralTargets(planText, requirements);
+	const promptRequirements = buildPromptRequirements(requirements, behavioralTargets);
 	const promptPlan = buildPromptPlan(planText);
 
 	const exampleText = repoContext.testFileExamples.length
@@ -554,6 +635,12 @@ async function generateWithModel(
 		2,
 	);
 
+	const behavioralSummary = behavioralTargets.length > 0
+		? behavioralTargets
+			.map((target, index) => `- ${index + 1}. ${target.heading ? `[${target.heading}] ` : ""}${target.text}`)
+			.join("\n")
+		: "(none extracted; infer the intended feature behavior from the full markdown)";
+
 	const userPrompt = `Framework: ${framework === "unknown" ? "Prefer Vitest but mirror local conventions" : framework}
 Suggested output path: ${outputPath}
 Plan path: ${planPath}
@@ -564,9 +651,15 @@ ${repoSummary}
 Existing test examples:
 ${exampleText}
 
-Extracted requirements:
+Behavioral targets inferred from the plan goal (these are the system behaviors to test, not markdown assertions):
+${behavioralSummary}
+
+Prioritized behavioral requirements for test generation:
 ${promptRequirements.text || "(none extracted; infer from full markdown)"}
-${promptRequirements.omittedCount > 0 ? `\n(${promptRequirements.omittedCount} extracted requirements omitted after prioritizing acceptance criteria, edge cases, and later sections)` : ""}
+${promptRequirements.omittedCount > 0 ? `\n(${promptRequirements.omittedCount} behavioral requirements omitted after prioritizing acceptance criteria, edge cases, and goal-defining sections)` : ""}
+
+Important constraint:
+Do not test the plan file, markdown headings, documentation wording, or phrase presence. Test only the real feature behavior the plan is trying to achieve.
 
 Full markdown plan:
 
@@ -710,12 +803,15 @@ async function runWithLoader<T>(
 }
 
 export const __testables = {
+	systemPrompt: SYSTEM_PROMPT,
 	detectFramework,
 	getConfigTestEntries,
 	inferTestDirectoriesFromText,
 	inferTestPatternsFromText,
 	inferScriptTestDirectories,
 	inferScriptTestPatterns,
+	classifyBehavioralHeading,
+	collectBehavioralTargets,
 	isGenericSuggestedOutput,
 	normalizeSuggestedOutputPath,
 	choosePreferredTestPattern,
