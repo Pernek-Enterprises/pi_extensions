@@ -669,6 +669,10 @@ async function writeJson(filePath: string, data: unknown): Promise<void> {
 	await fs.writeFile(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
 }
 
+function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
+	if (ctx.hasUI && typeof ctx.ui.notify === "function") ctx.ui.notify(message, level);
+}
+
 async function runWithLoader<T>(
 	ctx: ExtensionContext,
 	message: string,
@@ -728,14 +732,14 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 			if (!rawArgs && ctx.hasUI) {
 				const input = await ctx.ui.input("Markdown plan path", "specs/feature.md");
 				if (!input?.trim()) {
-					ctx.ui.notify("tdd-plan cancelled", "info");
+					notify(ctx, "tdd-plan cancelled", "info");
 					return;
 				}
 				rawArgs = input.trim();
 			}
 
 			if (!rawArgs) {
-				ctx.ui.notify("Usage: /tdd-plan <plan.md> [--run]", "warning");
+				notify(ctx, "Usage: /tdd-plan <plan.md> [--run]", "warning");
 				return;
 			}
 
@@ -744,14 +748,14 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 			const planPath = path.resolve(ctx.cwd, cleaned);
 
 			if (!(await exists(planPath))) {
-				ctx.ui.notify(`Plan file not found: ${planPath}`, "error");
+				notify(ctx, `Plan file not found: ${planPath}`, "error");
 				return;
 			}
 
 			const planText = await fs.readFile(planPath, "utf8");
 			const requirements = extractRequirements(planText);
 			if (requirements.length === 0) {
-				ctx.ui.notify("No bullet/numbered requirements found. Refine the plan so tests can map to concrete criteria.", "warning");
+				notify(ctx, "No bullet/numbered requirements found. Refine the plan so tests can map to concrete criteria.", "warning");
 			}
 
 			const pkg = await loadPackageJson(ctx.cwd);
@@ -761,29 +765,29 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				inspectRepo(rootDir, pkg?.data ?? null, framework),
 			);
 			if (repoScan.cancelled) {
-				ctx.ui.notify("tdd-plan cancelled", "info");
+				notify(ctx, "tdd-plan cancelled", "info");
 				return;
 			}
 			if (repoScan.error || !repoScan.result) {
-				ctx.ui.notify("Failed to inspect repository context for tdd-plan.", "error");
+				notify(ctx, "Failed to inspect repository context for tdd-plan.", "error");
 				return;
 			}
 			const repoContext = repoScan.result;
 			const suggestedOutput = buildDiscoveryAwareOutputPath(rootDir, planPath, repoContext);
 
 			if (!ctx.model) {
-				ctx.ui.notify("No active model selected. Select a model first, then run /tdd-plan again.", "error");
+				notify(ctx, "No active model selected. Select a model first, then run /tdd-plan again.", "error");
 				return;
 			}
 
 			const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
 			if (!apiKey) {
-				ctx.ui.notify("The active model has no API key/session available. Authenticate first, then run /tdd-plan again.", "error");
+				notify(ctx, "The active model has no API key/session available. Authenticate first, then run /tdd-plan again.", "error");
 				return;
 			}
 
 			if (planText.length > MAX_PLAN_CHARS) {
-				ctx.ui.notify(
+				notify(ctx, 
 					`Plan is large (${planText.length.toLocaleString()} chars). Sending a section-aware condensed version to the model to avoid stalls.`,
 					"warning",
 				);
@@ -802,16 +806,16 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				),
 			);
 			if (generation.cancelled) {
-				ctx.ui.notify("tdd-plan cancelled", "info");
+				notify(ctx, "tdd-plan cancelled", "info");
 				return;
 			}
 			if (generation.error) {
-				ctx.ui.notify("AI test generation failed. Try again with the active model, or switch models and retry.", "error");
+				notify(ctx, "AI test generation failed. Try again with the active model, or switch models and retry.", "error");
 				return;
 			}
 			const generated = generation.result;
 			if (!generated) {
-				ctx.ui.notify("AI test generation failed. Try again with the active model, or switch models and retry.", "error");
+				notify(ctx, "AI test generation failed. Try again with the active model, or switch models and retry.", "error");
 				return;
 			}
 
@@ -822,7 +826,7 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 			if (await exists(outputPath) && ctx.hasUI) {
 				const overwrite = await ctx.ui.confirm("Overwrite generated test file?", outputPath);
 				if (!overwrite) {
-					ctx.ui.notify("tdd-plan cancelled", "info");
+					notify(ctx, "tdd-plan cancelled", "info");
 					return;
 				}
 			}
@@ -861,6 +865,8 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 					ambiguous.map((item) => `- ${item}`).join("\n") +
 					"\n";
 				await fs.writeFile(ambiguousPath, body, "utf8");
+			} else if (await exists(ambiguousPath)) {
+				await fs.rm(ambiguousPath, { force: true });
 			}
 
 			if (runTests) {
@@ -872,17 +878,17 @@ export default function tddPlanExtension(pi: ExtensionAPI) {
 				}
 				if (command) {
 					const result = await pi.exec("bash", ["-lc", `cd ${JSON.stringify(rootDir)} && ${command}`]);
-					if (result.code === 0) ctx.ui.notify("Generated tests already pass", "info");
-					else ctx.ui.notify("Generated tests executed", "info");
+					if (result.code === 0) notify(ctx, "Generated tests already pass", "info");
+					else notify(ctx, "Generated tests executed", "info");
 				}
 			}
 
-			ctx.ui.notify(`Generated TDD tests: ${path.relative(rootDir, outputPath)}`, "info");
+			notify(ctx, `Generated TDD tests: ${path.relative(rootDir, outputPath)}`, "info");
 			if (repoContext.testFileExamples.length > 0) {
-				ctx.ui.notify(`Matched local test conventions from ${repoContext.testFileExamples.length} example file(s)`, "info");
+				notify(ctx, `Matched local test conventions from ${repoContext.testFileExamples.length} example file(s)`, "info");
 			}
 			if (ambiguous.length > 0) {
-				ctx.ui.notify(`Ambiguous requirements flagged: ${ambiguous.length}`, "warning");
+				notify(ctx, `Ambiguous requirements flagged: ${ambiguous.length}`, "warning");
 			}
 		},
 	});

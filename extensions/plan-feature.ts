@@ -44,16 +44,15 @@ type PlanMarkdownInput = {
 	title: string;
 	originalInput: string;
 	repoContextSummary?: string;
+	recommendedSplit?: string[];
 	problemStatement?: string;
 	scope?: string[];
 	outOfScope?: string[];
 	decisions?: string[];
 	assumptions?: string[];
 	openQuestions?: string[];
-	implementationPlan?: string[];
 	acceptanceCriteria?: string[];
 	edgeCases?: string[];
-	testIdeas?: string[];
 };
 
 const PLANNING_STATE_TYPE = "planning-session";
@@ -76,6 +75,19 @@ function slugify(input: string): string {
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 60) || "plan";
+}
+
+function isPathInsideRoot(rootDir: string, filePath: string): boolean {
+	const relative = path.relative(rootDir, filePath);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function resolvePlanOutputPath(repoRoot: string, requestedPath: string): string {
+	const resolved = path.resolve(repoRoot, requestedPath);
+	if (!isPathInsideRoot(repoRoot, resolved)) {
+		throw new Error("Plan path must stay inside the repository root");
+	}
+	return resolved;
 }
 
 function titleFromInput(input: string): string {
@@ -204,6 +216,10 @@ function notify(ctx: any, message: string, level: "info" | "warning" | "error" =
 	else if (typeof ctx?.notify === "function") ctx.notify(message);
 }
 
+function notifyUI(ctx: any, message: string, level: "info" | "warning" | "error" = "info"): void {
+	notify(ctx, message, level);
+}
+
 function sendDisplayMessage(pi: any, content: string): void {
 	if (typeof pi?.sendMessage !== "function") return;
 	pi.sendMessage({ customType: "planning-status", content, display: true }, { triggerTurn: false });
@@ -292,7 +308,7 @@ async function endPlanningSession(ctx: any): Promise<void> {
 		}
 		if (choice === "Save plan") {
 			const relativePath = path.join(".pi", "plans", `${state.slug}.plan.md`);
-			const absolutePath = path.resolve(state.repoRoot, relativePath);
+			const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
 			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
 			await writeFileImpl(absolutePath, state.currentDraft.endsWith("\n") ? state.currentDraft : `${state.currentDraft}\n`, "utf8");
 			const savedPath = path.relative(state.repoRoot, absolutePath);
@@ -339,6 +355,8 @@ function buildPlanningSystemPrompt(): string {
 		"Do not invent architecture unsupported by the repository or ask giant questionnaires.",
 		"If critical blockers remain unclear, call them out before finalizing.",
 		"Consider performance, rollout strategy, audit logging, analytics, and observability when relevant.",
+		"Only include a Recommended Split section when splitting the feature into multiple smaller vertical slices would clearly improve delivery.",
+		"If you include Recommended Split, every split must be a full vertical slice delivering end-to-end value; never split by frontend/backend layers.",
 		"Produce structured markdown when enough is known.",
 	].join(" ");
 }
@@ -358,6 +376,13 @@ function renderPlanMarkdown(input: PlanMarkdownInput): string {
 	const parts = [
 		`# Plan: ${input.title}`,
 		"",
+	];
+
+	if ((input.recommendedSplit?.filter(Boolean) ?? []).length > 0) {
+		parts.push(section("Recommended Split", input.recommendedSplit), "");
+	}
+
+	parts.push(
 		"## Requested feature",
 		input.originalInput,
 		"",
@@ -377,14 +402,10 @@ function renderPlanMarkdown(input: PlanMarkdownInput): string {
 		"",
 		section("Open questions", input.openQuestions),
 		"",
-		section("Implementation plan", input.implementationPlan, true),
-		"",
 		section("Acceptance criteria", input.acceptanceCriteria),
 		"",
 		section("Edge cases", input.edgeCases),
-		"",
-		section("Test ideas", input.testIdeas),
-	];
+	);
 	return parts.join("\n").trim() + "\n";
 }
 
@@ -568,36 +589,34 @@ async function collectPlanningContext(ctx: any, input: string): Promise<Partial<
 function synthesizePlanFromState(state: PlanningSessionState): string {
 	const openQuestions = state.questions.filter((question) => question.status === "open").map((question) => question.question);
 	const scope = state.relevantFiles.slice(0, 4).map((file) => `Review and update ${file.path}`);
-	const implementationPlan = [
-		"Confirm remaining feature decisions with the user.",
-		"Implement the smallest repo-aligned changes needed for the feature.",
-		"Add or update tests near the affected modules.",
-		"Validate behavior against the acceptance criteria before finishing.",
-	];
+	const recommendedSplit = scope.length > 2
+		? [
+			"Slice 1: deliver the smallest end-to-end version of the feature for a single primary user flow.",
+			"Slice 2: add the next user-visible capability or supporting variant on top of slice 1.",
+		]
+		: undefined;
 	const acceptanceCriteria = [
 		"The feature behavior is documented in repo-grounded terms.",
-		"The implementation plan cites affected modules or explicitly notes when no prior module exists.",
-		"Test ideas cover the primary flow and at least one edge case.",
+		"The plan cites affected modules or explicitly notes when no prior module exists.",
+		"Acceptance criteria cover the primary user-visible flow and at least one edge case.",
 	];
 	const edgeCases = [
 		"No obvious existing module is found for the request.",
 		"Critical behavior remains ambiguous and needs clarification before implementation.",
 	];
-	const testIdeas = state.relevantFiles.filter((file) => /test|spec|__tests__/i.test(file.path)).map((file) => `Extend tests around ${file.path}`);
 	return renderPlanMarkdown({
 		title: state.title,
 		originalInput: state.originalInput,
 		repoContextSummary: state.repoContextSummary,
+		recommendedSplit,
 		problemStatement: `Add ${state.title} in a way that fits the existing repository structure and conventions.`,
 		scope,
 		outOfScope: ["Unconfirmed product changes beyond the requested feature"],
 		decisions: state.decisions,
 		assumptions: state.assumptions.length > 0 ? state.assumptions : ["Reuse existing project conventions unless clarified otherwise."],
 		openQuestions,
-		implementationPlan,
 		acceptanceCriteria,
 		edgeCases,
-		testIdeas,
 	});
 }
 
@@ -616,7 +635,7 @@ function extractAssistantText(message: any): string {
 function maybeExtractDraftFromMessage(message: any): string | undefined {
 	const text = extractAssistantText(message).trim();
 	if (!text) return undefined;
-	if (/^# Plan:/m.test(text) || (/^## Requested feature$/m.test(text) && /^## Implementation plan$/m.test(text))) return text;
+	if (/^# Plan:/m.test(text) || (/^## Requested feature$/m.test(text) && /^## Acceptance criteria$/m.test(text))) return text;
 	return undefined;
 }
 
@@ -640,6 +659,7 @@ export const __testables = {
 	buildPlanningSystemPrompt,
 	buildFinalizationPrompt,
 	renderPlanMarkdown,
+	resolvePlanOutputPath,
 	detectRepoRoot,
 	loadPlanningPackageJson,
 	extractPlanningKeywords,
@@ -697,14 +717,14 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const input = (args ?? "").trim();
 			if (!input) {
-				ctx.ui.notify("Usage: /plan <feature brief or plan path>", "warning");
+				notifyUI(ctx, "Usage: /plan <feature brief or plan path>", "warning");
 				return;
 			}
 
 			try {
 				await assertRuntimePlanningPrerequisites(ctx);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "error");
+				notifyUI(ctx, (error as Error).message, "error");
 				return;
 			}
 
@@ -712,7 +732,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			try {
 				state = await startPlanningSession({ ...ctx, pi }, input);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "warning");
+				notifyUI(ctx, (error as Error).message, "warning");
 				return;
 			}
 
@@ -728,7 +748,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			};
 			await applyPlanningState({ ...ctx, pi }, state);
 			await setPlanningWidget(ctx, true, Boolean(state.currentDraft));
-			ctx.ui.notify("Planning context collected.", "info");
+			notifyUI(ctx, "Planning context collected.", "info");
 
 			const prompt = buildInitialUserPrompt({
 				originalInput: state.originalInput,
@@ -746,7 +766,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 			if (!state?.active) {
-				ctx.ui.notify("No active planning session.", "warning");
+				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
 			const openQuestions = state.questions.filter((question) => question.status === "open").length;
@@ -765,7 +785,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				`- planning mode active: ${state.active ? "yes" : "no"}`,
 			].join("\n");
 			sendDisplayMessage(pi, body);
-			ctx.ui.notify("Planning status shown.", "info");
+			notifyUI(ctx, "Planning status shown.", "info");
 		},
 	});
 
@@ -774,7 +794,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 			if (!state?.active) {
-				ctx.ui.notify("No active planning session.", "warning");
+				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
 			const draft = state.currentDraft || synthesizePlanFromState(state);
@@ -786,8 +806,8 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			};
 			await applyPlanningState({ ...ctx, pi }, nextState);
 			await setPlanningWidget(ctx, true, true);
-			if (typeof ctx.ui.setEditorText === "function") ctx.ui.setEditorText(draft);
-			ctx.ui.notify("Plan finalized. Next step: /plan-save", "info");
+			if (typeof ctx?.ui?.setEditorText === "function") ctx.ui.setEditorText(draft);
+			notifyUI(ctx, "Plan finalized. Next step: /plan-save", "info");
 		},
 	});
 
@@ -796,7 +816,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 			if (!state?.active) {
-				ctx.ui.notify("No active planning session.", "warning");
+				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
 			let draft = state.currentDraft;
@@ -805,13 +825,13 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				if (ctx.hasUI && typeof ctx.ui.confirm === "function") {
 					const confirmed = await ctx.ui.confirm("Save partial plan?", "No finalized draft exists yet; save the current best synthesized plan.");
 					if (!confirmed) {
-						ctx.ui.notify("plan-save cancelled", "info");
+						notifyUI(ctx, "plan-save cancelled", "info");
 						return;
 					}
 				}
 			}
 			const relativePath = (args ?? "").trim() || path.join(".pi", "plans", `${state.slug}.plan.md`);
-			const absolutePath = path.resolve(state.repoRoot, relativePath);
+			const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
 			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
 			await writeFileImpl(absolutePath, draft.endsWith("\n") ? draft : `${draft}\n`, "utf8");
 			const savedPath = path.relative(state.repoRoot, absolutePath);
@@ -830,7 +850,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			});
 			await applyPlanningState({ ...ctx, pi }, nextState);
 			await setPlanningWidget(ctx, true, true);
-			ctx.ui.notify(`Plan saved: ${savedPath}`, "info");
+			notifyUI(ctx, `Plan saved: ${savedPath}`, "info");
 		},
 	});
 
@@ -841,7 +861,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				const command = await handlePlanTests(ctx);
 				sendDisplayMessage(pi, `Run:\n\n${command}`);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "warning");
+				notifyUI(ctx, (error as Error).message, "warning");
 			}
 		},
 	});
@@ -852,7 +872,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			try {
 				await endPlanningSession(ctx);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "warning");
+				notifyUI(ctx, (error as Error).message, "warning");
 			}
 		},
 	});
