@@ -77,6 +77,19 @@ function slugify(input: string): string {
 		.slice(0, 60) || "plan";
 }
 
+function isPathInsideRoot(rootDir: string, filePath: string): boolean {
+	const relative = path.relative(rootDir, filePath);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function resolvePlanOutputPath(repoRoot: string, requestedPath: string): string {
+	const resolved = path.resolve(repoRoot, requestedPath);
+	if (!isPathInsideRoot(repoRoot, resolved)) {
+		throw new Error("Plan path must stay inside the repository root");
+	}
+	return resolved;
+}
+
 function titleFromInput(input: string): string {
 	const trimmed = input.trim();
 	if (!trimmed) return "Feature plan";
@@ -203,6 +216,10 @@ function notify(ctx: any, message: string, level: "info" | "warning" | "error" =
 	else if (typeof ctx?.notify === "function") ctx.notify(message);
 }
 
+function notifyUI(ctx: any, message: string, level: "info" | "warning" | "error" = "info"): void {
+	notify(ctx, message, level);
+}
+
 function sendDisplayMessage(pi: any, content: string): void {
 	if (typeof pi?.sendMessage !== "function") return;
 	pi.sendMessage({ customType: "planning-status", content, display: true }, { triggerTurn: false });
@@ -291,7 +308,7 @@ async function endPlanningSession(ctx: any): Promise<void> {
 		}
 		if (choice === "Save plan") {
 			const relativePath = path.join(".pi", "plans", `${state.slug}.plan.md`);
-			const absolutePath = path.resolve(state.repoRoot, relativePath);
+			const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
 			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
 			await writeFileImpl(absolutePath, state.currentDraft.endsWith("\n") ? state.currentDraft : `${state.currentDraft}\n`, "utf8");
 			const savedPath = path.relative(state.repoRoot, absolutePath);
@@ -642,6 +659,7 @@ export const __testables = {
 	buildPlanningSystemPrompt,
 	buildFinalizationPrompt,
 	renderPlanMarkdown,
+	resolvePlanOutputPath,
 	detectRepoRoot,
 	loadPlanningPackageJson,
 	extractPlanningKeywords,
@@ -699,14 +717,14 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const input = (args ?? "").trim();
 			if (!input) {
-				ctx.ui.notify("Usage: /plan <feature brief or plan path>", "warning");
+				notifyUI(ctx, "Usage: /plan <feature brief or plan path>", "warning");
 				return;
 			}
 
 			try {
 				await assertRuntimePlanningPrerequisites(ctx);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "error");
+				notifyUI(ctx, (error as Error).message, "error");
 				return;
 			}
 
@@ -714,7 +732,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			try {
 				state = await startPlanningSession({ ...ctx, pi }, input);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "warning");
+				notifyUI(ctx, (error as Error).message, "warning");
 				return;
 			}
 
@@ -730,7 +748,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			};
 			await applyPlanningState({ ...ctx, pi }, state);
 			await setPlanningWidget(ctx, true, Boolean(state.currentDraft));
-			ctx.ui.notify("Planning context collected.", "info");
+			notifyUI(ctx, "Planning context collected.", "info");
 
 			const prompt = buildInitialUserPrompt({
 				originalInput: state.originalInput,
@@ -748,7 +766,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 			if (!state?.active) {
-				ctx.ui.notify("No active planning session.", "warning");
+				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
 			const openQuestions = state.questions.filter((question) => question.status === "open").length;
@@ -767,7 +785,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				`- planning mode active: ${state.active ? "yes" : "no"}`,
 			].join("\n");
 			sendDisplayMessage(pi, body);
-			ctx.ui.notify("Planning status shown.", "info");
+			notifyUI(ctx, "Planning status shown.", "info");
 		},
 	});
 
@@ -776,7 +794,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 			if (!state?.active) {
-				ctx.ui.notify("No active planning session.", "warning");
+				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
 			const draft = state.currentDraft || synthesizePlanFromState(state);
@@ -788,8 +806,8 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			};
 			await applyPlanningState({ ...ctx, pi }, nextState);
 			await setPlanningWidget(ctx, true, true);
-			if (typeof ctx.ui.setEditorText === "function") ctx.ui.setEditorText(draft);
-			ctx.ui.notify("Plan finalized. Next step: /plan-save", "info");
+			if (typeof ctx?.ui?.setEditorText === "function") ctx.ui.setEditorText(draft);
+			notifyUI(ctx, "Plan finalized. Next step: /plan-save", "info");
 		},
 	});
 
@@ -798,7 +816,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 			if (!state?.active) {
-				ctx.ui.notify("No active planning session.", "warning");
+				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
 			let draft = state.currentDraft;
@@ -807,13 +825,13 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				if (ctx.hasUI && typeof ctx.ui.confirm === "function") {
 					const confirmed = await ctx.ui.confirm("Save partial plan?", "No finalized draft exists yet; save the current best synthesized plan.");
 					if (!confirmed) {
-						ctx.ui.notify("plan-save cancelled", "info");
+						notifyUI(ctx, "plan-save cancelled", "info");
 						return;
 					}
 				}
 			}
 			const relativePath = (args ?? "").trim() || path.join(".pi", "plans", `${state.slug}.plan.md`);
-			const absolutePath = path.resolve(state.repoRoot, relativePath);
+			const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
 			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
 			await writeFileImpl(absolutePath, draft.endsWith("\n") ? draft : `${draft}\n`, "utf8");
 			const savedPath = path.relative(state.repoRoot, absolutePath);
@@ -832,7 +850,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			});
 			await applyPlanningState({ ...ctx, pi }, nextState);
 			await setPlanningWidget(ctx, true, true);
-			ctx.ui.notify(`Plan saved: ${savedPath}`, "info");
+			notifyUI(ctx, `Plan saved: ${savedPath}`, "info");
 		},
 	});
 
@@ -843,7 +861,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				const command = await handlePlanTests(ctx);
 				sendDisplayMessage(pi, `Run:\n\n${command}`);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "warning");
+				notifyUI(ctx, (error as Error).message, "warning");
 			}
 		},
 	});
@@ -854,7 +872,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 			try {
 				await endPlanningSession(ctx);
 			} catch (error) {
-				ctx.ui.notify((error as Error).message, "warning");
+				notifyUI(ctx, (error as Error).message, "warning");
 			}
 		},
 	});

@@ -514,6 +514,17 @@ test("final plan markdown output omits Recommended Split when not provided", () 
 	assert.doesNotMatch(markdown, /^## Recommended Split$/m);
 });
 
+test("resolvePlanOutputPath keeps saved plans inside the repo root", () => {
+	assert.equal(
+		__testables.resolvePlanOutputPath("/repo", ".pi/plans/feature.plan.md"),
+		"/repo/.pi/plans/feature.plan.md",
+	);
+	assert.throws(
+		() => __testables.resolvePlanOutputPath("/repo", "../outside.plan.md"),
+		/inside the repository root/i,
+	);
+});
+
 test("repo root detection and package.json loading fall back to ctx.cwd when no repo root or package.json exists", async () => {
 	const repoRoot = await __testables.detectRepoRoot({ cwd: "/tmp/no-package" });
 	assert.equal(repoRoot, "/tmp/no-package");
