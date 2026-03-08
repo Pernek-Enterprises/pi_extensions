@@ -1,6 +1,17 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+	Editor,
+	type EditorTheme,
+	Key,
+	matchesKey,
+	truncateToWidth,
+	type TUI,
+	visibleWidth,
+	wrapTextWithAnsi,
+	type Component,
+} from "@mariozechner/pi-tui";
 
 type PlanningStatus = "collecting-context" | "clarifying" | "drafting" | "finalized";
 
@@ -16,6 +27,11 @@ type PlanningQuestion = {
 	question: string;
 	answer?: string;
 	status: "open" | "answered" | "skipped";
+};
+
+type ExtractedQuestion = {
+	question: string;
+	context?: string;
 };
 
 type PlanningSessionState = {
@@ -38,6 +54,7 @@ type PlanningSessionState = {
 	decisions: string[];
 	currentDraft?: string;
 	savedPath?: string;
+	lastInteractivePromptSignature?: string;
 };
 
 type PlanMarkdownInput = {
@@ -223,6 +240,207 @@ function notifyUI(ctx: any, message: string, level: "info" | "warning" | "error"
 function sendDisplayMessage(pi: any, content: string): void {
 	if (typeof pi?.sendMessage !== "function") return;
 	pi.sendMessage({ customType: "planning-status", content, display: true }, { triggerTurn: false });
+}
+
+class PlanningQnAComponent implements Component {
+	private questions: ExtractedQuestion[];
+	private answers: string[];
+	private currentIndex = 0;
+	private editor: Editor;
+	private tui: TUI;
+	private onDone: (result: string | null) => void;
+	private showingConfirmation = false;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+	private dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
+	private bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+	private cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
+	private green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+	private yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+	private gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
+
+	constructor(questions: ExtractedQuestion[], tui: TUI, onDone: (result: string | null) => void) {
+		this.questions = questions;
+		this.answers = questions.map(() => "");
+		this.tui = tui;
+		this.onDone = onDone;
+
+		const editorTheme: EditorTheme = {
+			borderColor: this.dim,
+			selectList: {
+				selectedBg: (s: string) => `\x1b[44m${s}\x1b[0m`,
+				matchHighlight: this.cyan,
+				itemSecondary: this.gray,
+			},
+		};
+		this.editor = new Editor(tui, editorTheme);
+		this.editor.disableSubmit = true;
+		this.editor.onChange = () => {
+			this.invalidate();
+			this.tui.requestRender();
+		};
+	}
+
+	private saveCurrentAnswer(): void {
+		this.answers[this.currentIndex] = this.editor.getText();
+	}
+
+	private navigateTo(index: number): void {
+		if (index < 0 || index >= this.questions.length) return;
+		this.saveCurrentAnswer();
+		this.currentIndex = index;
+		this.editor.setText(this.answers[index] || "");
+		this.invalidate();
+	}
+
+	private submit(): void {
+		this.saveCurrentAnswer();
+		const parts: string[] = [];
+		for (let i = 0; i < this.questions.length; i++) {
+			const q = this.questions[i];
+			const a = this.answers[i]?.trim() || "(no answer)";
+			parts.push(`Q: ${q.question}`);
+			if (q.context) parts.push(`> ${q.context}`);
+			parts.push(`A: ${a}`);
+			parts.push("");
+		}
+		this.onDone(parts.join("\n").trim());
+	}
+
+	private cancel(): void {
+		this.onDone(null);
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+
+	handleInput(data: string): void {
+		if (this.showingConfirmation) {
+			if (matchesKey(data, Key.enter) || data.toLowerCase() === "y") {
+				this.submit();
+				return;
+			}
+			if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data.toLowerCase() === "n") {
+				this.showingConfirmation = false;
+				this.invalidate();
+				this.tui.requestRender();
+				return;
+			}
+			return;
+		}
+
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+			this.cancel();
+			return;
+		}
+		if (matchesKey(data, Key.tab)) {
+			if (this.currentIndex < this.questions.length - 1) {
+				this.navigateTo(this.currentIndex + 1);
+				this.tui.requestRender();
+			}
+			return;
+		}
+		if (matchesKey(data, Key.shift("tab"))) {
+			if (this.currentIndex > 0) {
+				this.navigateTo(this.currentIndex - 1);
+				this.tui.requestRender();
+			}
+			return;
+		}
+		if (matchesKey(data, Key.up) && this.editor.getText() === "") {
+			if (this.currentIndex > 0) {
+				this.navigateTo(this.currentIndex - 1);
+				this.tui.requestRender();
+				return;
+			}
+		}
+		if (matchesKey(data, Key.down) && this.editor.getText() === "") {
+			if (this.currentIndex < this.questions.length - 1) {
+				this.navigateTo(this.currentIndex + 1);
+				this.tui.requestRender();
+				return;
+			}
+		}
+		if (matchesKey(data, Key.enter) && !matchesKey(data, Key.shift("enter"))) {
+			this.saveCurrentAnswer();
+			if (this.currentIndex < this.questions.length - 1) this.navigateTo(this.currentIndex + 1);
+			else this.showingConfirmation = true;
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+
+		this.editor.handleInput(data);
+		this.invalidate();
+		this.tui.requestRender();
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		const lines: string[] = [];
+		const boxWidth = Math.min(width - 4, 120);
+		const contentWidth = boxWidth - 4;
+		const horizontalLine = (count: number) => "─".repeat(count);
+		const boxLine = (content: string, leftPad = 2): string => {
+			const paddedContent = " ".repeat(leftPad) + content;
+			const contentLen = visibleWidth(paddedContent);
+			const rightPad = Math.max(0, boxWidth - contentLen - 2);
+			return this.dim("│") + paddedContent + " ".repeat(rightPad) + this.dim("│");
+		};
+		const emptyBoxLine = (): string => this.dim("│") + " ".repeat(boxWidth - 2) + this.dim("│");
+		const padToWidth = (line: string): string => line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+
+		lines.push(padToWidth(this.dim("╭" + horizontalLine(boxWidth - 2) + "╮")));
+		const title = `${this.bold(this.cyan("Planning questions"))} ${this.dim(`(${this.currentIndex + 1}/${this.questions.length})`)}`;
+		lines.push(padToWidth(boxLine(title)));
+		lines.push(padToWidth(this.dim("├" + horizontalLine(boxWidth - 2) + "┤")));
+
+		const progressParts: string[] = [];
+		for (let i = 0; i < this.questions.length; i++) {
+			const answered = (this.answers[i]?.trim() || "").length > 0;
+			const current = i === this.currentIndex;
+			if (current) progressParts.push(this.cyan("●"));
+			else if (answered) progressParts.push(this.green("●"));
+			else progressParts.push(this.dim("○"));
+		}
+		lines.push(padToWidth(boxLine(progressParts.join(" "))));
+		lines.push(padToWidth(emptyBoxLine()));
+
+		const q = this.questions[this.currentIndex];
+		for (const line of wrapTextWithAnsi(`${this.bold("Q:")} ${q.question}`, contentWidth)) {
+			lines.push(padToWidth(boxLine(line)));
+		}
+		if (q.context) {
+			lines.push(padToWidth(emptyBoxLine()));
+			for (const line of wrapTextWithAnsi(this.gray(`> ${q.context}`), contentWidth - 2)) {
+				lines.push(padToWidth(boxLine(line)));
+			}
+		}
+		lines.push(padToWidth(emptyBoxLine()));
+
+		const answerPrefix = this.bold("A: ");
+		const editorWidth = contentWidth - 7;
+		const editorLines = this.editor.render(editorWidth);
+		for (let i = 1; i < editorLines.length - 1; i++) {
+			if (i === 1) lines.push(padToWidth(boxLine(answerPrefix + editorLines[i])));
+			else lines.push(padToWidth(boxLine("   " + editorLines[i])));
+		}
+		lines.push(padToWidth(emptyBoxLine()));
+		lines.push(padToWidth(this.dim("├" + horizontalLine(boxWidth - 2) + "┤")));
+		if (this.showingConfirmation) {
+			const confirmMsg = `${this.yellow("Submit all answers?")} ${this.dim("(Enter/y to confirm, Esc/n to cancel)")}`;
+			lines.push(padToWidth(boxLine(truncateToWidth(confirmMsg, contentWidth))));
+		} else {
+			const controls = `${this.dim("Tab/Enter")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline · ${this.dim("Esc")} cancel`;
+			lines.push(padToWidth(boxLine(truncateToWidth(controls, contentWidth))));
+		}
+		lines.push(padToWidth(this.dim("╰" + horizontalLine(boxWidth - 2) + "╯")));
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
 }
 
 function getCurrentLeafId(ctx: any): string | undefined {
@@ -620,6 +838,173 @@ function synthesizePlanFromState(state: PlanningSessionState): string {
 	});
 }
 
+function extractOpenQuestionsFromDraft(draft: string): ExtractedQuestion[] {
+	const lines = draft.split(/\r?\n/);
+	let start = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (/^##\s+Open questions\s*$/i.test(lines[i].trim())) {
+			start = i + 1;
+			break;
+		}
+	}
+	if (start < 0) return [];
+
+	const questions: ExtractedQuestion[] = [];
+	for (let i = start; i < lines.length; i++) {
+		const line = lines[i].trim();
+		if (!line) continue;
+		if (/^##\s+/.test(line)) break;
+		const bulletMatch = line.match(/^[-*+]\s+(.+)$/);
+		const numberedMatch = line.match(/^\d+[.)]\s+(.+)$/);
+		const value = bulletMatch?.[1] ?? numberedMatch?.[1];
+		if (!value) continue;
+		if (/^\(none\)$/i.test(value.trim())) return [];
+		questions.push({ question: value.trim() });
+	}
+	return questions;
+}
+
+function syncQuestionsWithDraft(state: PlanningSessionState, extractedQuestions: ExtractedQuestion[]): PlanningQuestion[] {
+	if (extractedQuestions.length === 0) {
+		return state.questions.map((question) => ({
+			...question,
+			status: question.answer?.trim() ? "answered" : "skipped",
+		}));
+	}
+
+	const existingByText = new Map(state.questions.map((question) => [question.question.trim().toLowerCase(), question]));
+	return extractedQuestions.map((question, index) => {
+		const existing = existingByText.get(question.question.trim().toLowerCase());
+		return {
+			id: existing?.id ?? `q-${index + 1}`,
+			question: question.question,
+			answer: existing?.answer,
+			status: existing?.answer?.trim() ? "answered" : existing?.status === "skipped" ? "skipped" : "open",
+		};
+	});
+}
+
+function applyAnswersToQuestions(state: PlanningSessionState, answers: string): PlanningQuestion[] {
+	const answerByQuestion = new Map<string, string>();
+	const blocks = answers.split(/\n\s*\n+/);
+	for (const block of blocks) {
+		const questionMatch = block.match(/(?:^|\n)Q:\s*(.+)/i);
+		const answerMatch = block.match(/(?:^|\n)A:\s*([\s\S]+)/i);
+		const question = questionMatch?.[1]?.trim();
+		const answer = answerMatch?.[1]?.trim();
+		if (question && answer && answer !== "(no answer)") answerByQuestion.set(question.toLowerCase(), answer);
+	}
+
+	return state.questions.map((question) => {
+		const answer = answerByQuestion.get(question.question.trim().toLowerCase()) ?? question.answer;
+		return {
+			...question,
+			answer,
+			status: answer?.trim() ? "answered" : question.status,
+		};
+	});
+}
+
+async function promptForPlanningAnswers(ctx: any, questions: ExtractedQuestion[]): Promise<string | null> {
+	if (!ctx?.hasUI || typeof ctx?.ui?.custom !== "function") return null;
+	return ctx.ui.custom<string | null>((tui: TUI, _theme: any, _kb: any, done: (value: string | null) => void) => {
+		return new PlanningQnAComponent(questions, tui, done);
+	});
+}
+
+async function savePlanningDraft(ctx: any, pi: any, state: PlanningSessionState, requestedPath?: string): Promise<PlanningSessionState | undefined> {
+	let draft = state.currentDraft;
+	if (!draft) {
+		draft = synthesizePlanFromState(state);
+		if (ctx.hasUI && typeof ctx.ui.confirm === "function") {
+			const confirmed = await ctx.ui.confirm("Save partial plan?", "No finalized draft exists yet; save the current best synthesized plan.");
+			if (!confirmed) {
+				notifyUI(ctx, "plan-save cancelled", "info");
+				return undefined;
+			}
+		}
+	}
+	const relativePath = requestedPath?.trim() || path.join(".pi", "plans", `${state.slug}.plan.md`);
+	const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
+	await mkdirImpl(path.dirname(absolutePath), { recursive: true });
+	await writeFileImpl(absolutePath, draft.endsWith("\n") ? draft : `${draft}\n`, "utf8");
+	const savedPath = path.relative(state.repoRoot, absolutePath);
+	const nextState: PlanningSessionState = {
+		...state,
+		currentDraft: draft,
+		savedPath,
+		status: "finalized",
+		updatedAt: new Date().toISOString(),
+	};
+	appendCustomEntry(pi, PLANNING_METADATA_TYPE, {
+		id: state.id,
+		slug: state.slug,
+		savedPath,
+		updatedAt: nextState.updatedAt,
+	});
+	await applyPlanningState({ ...ctx, pi }, nextState);
+	await setPlanningWidget(ctx, true, true);
+	notifyUI(ctx, `Plan saved: ${savedPath}`, "info");
+	return nextState;
+}
+
+async function maybeHandlePlanningFollowUp(pi: any, ctx: any, state: PlanningSessionState, draft: string): Promise<void> {
+	if (!ctx?.hasUI) return;
+	const signature = draft.trim();
+	if (!signature || state.lastInteractivePromptSignature === signature) return;
+
+	const questions = extractOpenQuestionsFromDraft(draft);
+	const nextStateBase: PlanningSessionState = {
+		...state,
+		questions: syncQuestionsWithDraft(state, questions),
+		lastInteractivePromptSignature: signature,
+		updatedAt: new Date().toISOString(),
+	};
+	await applyPlanningState({ ...ctx, pi }, nextStateBase);
+
+	if (questions.length > 0) {
+		const answers = await promptForPlanningAnswers(ctx, questions);
+		if (answers === null) {
+			notifyUI(ctx, "Planning questions cancelled", "info");
+			return;
+		}
+		await applyPlanningState({
+			...ctx,
+			pi,
+		}, {
+			...nextStateBase,
+			questions: applyAnswersToQuestions(nextStateBase, answers),
+			updatedAt: new Date().toISOString(),
+		});
+		pi.sendMessage(
+			{
+				customType: "answers",
+				content: "I answered your planning questions in the following way:\n\n" + answers,
+				display: true,
+			},
+			{ triggerTurn: true },
+		);
+		return;
+	}
+
+	if (typeof ctx?.ui?.select !== "function") return;
+	const options = state.savedPath
+		? ["End planning", "Keep planning"]
+		: ["Save plan", "Save plan and end planning", "End planning", "Keep planning"];
+	const choice = await ctx.ui.select("Plan draft complete:", options);
+	if (!choice || choice === "Keep planning") return;
+	if (choice === "Save plan") {
+		await savePlanningDraft(ctx, pi, state);
+		return;
+	}
+	if (choice === "Save plan and end planning") {
+		const savedState = await savePlanningDraft(ctx, pi, state);
+		if (savedState) await endPlanningSession({ ...ctx, state: { ...(ctx.state ?? {}), planning: savedState } });
+		return;
+	}
+	if (choice === "End planning") await endPlanningSession(ctx);
+}
+
 function extractAssistantText(message: any): string {
 	if (!message) return "";
 	if (typeof message.content === "string") return message.content;
@@ -668,6 +1053,10 @@ export const __testables = {
 	assertPlanningPrerequisites,
 	collectPlanningContext,
 	synthesizePlanFromState,
+	extractOpenQuestionsFromDraft,
+	syncQuestionsWithDraft,
+	applyAnswersToQuestions,
+	savePlanningDraft,
 	maybeExtractDraftFromMessage,
 	shouldCaptureDraftUpdate,
 	get __fsWriteFile() {
@@ -701,15 +1090,18 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 		const state = getPlanningState(ctx) ?? loadPersistedPlanningState(ctx);
 		const draft = maybeExtractDraftFromMessage((event as any)?.message);
 		if (!shouldCaptureDraftUpdate(state, draft)) return;
-		const nextStatus: PlanningStatus = /## Open questions\n- \(none\)/i.test(draft) ? "finalized" : "drafting";
+		const extractedQuestions = extractOpenQuestionsFromDraft(draft);
+		const nextStatus: PlanningStatus = extractedQuestions.length === 0 ? "finalized" : "drafting";
 		const nextState: PlanningSessionState = {
 			...state,
 			currentDraft: draft,
+			questions: syncQuestionsWithDraft(state, extractedQuestions),
 			status: nextStatus,
 			updatedAt: new Date().toISOString(),
 		};
 		await applyPlanningState(ctx, nextState);
 		await setPlanningWidget(ctx, true, true);
+		await maybeHandlePlanningFollowUp(pi, ctx, nextState, draft);
 	});
 
 	pi.registerCommand("plan", {
@@ -736,7 +1128,18 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const planningContext = await collectPlanningContext(ctx, input);
+			let planningContext: Awaited<ReturnType<typeof collectPlanningContext>>;
+			try {
+				planningContext = await collectPlanningContext(ctx, input);
+			} catch (error) {
+				await clearPlanningState(ctx);
+				await setPlanningWidget(ctx, false, false);
+				if (state.originId && typeof ctx.navigateTree === "function") {
+					await ctx.navigateTree(state.originId, { summarize: false });
+				}
+				notifyUI(ctx, `Failed to collect planning context: ${(error as Error).message}`, "error");
+				return;
+			}
 			state = {
 				...state,
 				repoRoot: planningContext.repoRoot ?? state.repoRoot,
@@ -797,16 +1200,29 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
-			const draft = state.currentDraft || synthesizePlanFromState(state);
+			const fallbackDraft = state.currentDraft || synthesizePlanFromState(state);
 			const nextState: PlanningSessionState = {
 				...state,
-				currentDraft: draft,
-				status: "finalized",
+				currentDraft: fallbackDraft,
+				status: "drafting",
 				updatedAt: new Date().toISOString(),
 			};
 			await applyPlanningState({ ...ctx, pi }, nextState);
 			await setPlanningWidget(ctx, true, true);
-			if (typeof ctx?.ui?.setEditorText === "function") ctx.ui.setEditorText(draft);
+			if (typeof ctx?.ui?.setEditorText === "function") ctx.ui.setEditorText(fallbackDraft);
+
+			if (typeof pi.sendUserMessage === "function") {
+				pi.sendUserMessage(buildFinalizationPrompt());
+				notifyUI(ctx, "Asked the planner to finalize the current plan. Next step: /plan-save", "info");
+				return;
+			}
+
+			const finalizedState: PlanningSessionState = {
+				...nextState,
+				status: "finalized",
+				updatedAt: new Date().toISOString(),
+			};
+			await applyPlanningState({ ...ctx, pi }, finalizedState);
 			notifyUI(ctx, "Plan finalized. Next step: /plan-save", "info");
 		},
 	});
@@ -819,38 +1235,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				notifyUI(ctx, "No active planning session.", "warning");
 				return;
 			}
-			let draft = state.currentDraft;
-			if (!draft) {
-				draft = synthesizePlanFromState(state);
-				if (ctx.hasUI && typeof ctx.ui.confirm === "function") {
-					const confirmed = await ctx.ui.confirm("Save partial plan?", "No finalized draft exists yet; save the current best synthesized plan.");
-					if (!confirmed) {
-						notifyUI(ctx, "plan-save cancelled", "info");
-						return;
-					}
-				}
-			}
-			const relativePath = (args ?? "").trim() || path.join(".pi", "plans", `${state.slug}.plan.md`);
-			const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
-			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
-			await writeFileImpl(absolutePath, draft.endsWith("\n") ? draft : `${draft}\n`, "utf8");
-			const savedPath = path.relative(state.repoRoot, absolutePath);
-			const nextState: PlanningSessionState = {
-				...state,
-				currentDraft: draft,
-				savedPath,
-				status: "finalized",
-				updatedAt: new Date().toISOString(),
-			};
-			appendCustomEntry(pi, PLANNING_METADATA_TYPE, {
-				id: state.id,
-				slug: state.slug,
-				savedPath,
-				updatedAt: nextState.updatedAt,
-			});
-			await applyPlanningState({ ...ctx, pi }, nextState);
-			await setPlanningWidget(ctx, true, true);
-			notifyUI(ctx, `Plan saved: ${savedPath}`, "info");
+			await savePlanningDraft(ctx, pi, state, args ?? "");
 		},
 	});
 

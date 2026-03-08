@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { __testables } from "../../extensions/plan-feature.ts";
+import planFeatureExtension, { __testables } from "../../extensions/plan-feature.ts";
 
 test("getPlanningState/applyPlanningState/clearPlanningState persist and clear planning session state", async () => {
 	const entryLog: Array<{ type: string; value: unknown }> = [];
@@ -583,6 +583,155 @@ test("error handling shows 'No active model selected' and 'Authenticate the acti
 		/Authenticate the active model first/,
 	);
 });
+
+test("extractOpenQuestionsFromDraft returns question bullets and treats '(none)' as empty", () => {
+	const withQuestions = __testables.extractOpenQuestionsFromDraft(`
+# Plan: Add recurring invoices
+
+## Open questions
+- Should pause/resume emit audit logs?
+- Should admins be able to edit cadence after creation?
+
+## Acceptance criteria
+- Users can pause an invoice
+`);
+	assert.deepEqual(withQuestions, [
+		{ question: "Should pause/resume emit audit logs?" },
+		{ question: "Should admins be able to edit cadence after creation?" },
+	]);
+
+	const withoutQuestions = __testables.extractOpenQuestionsFromDraft(`
+# Plan: Add recurring invoices
+
+## Open questions
+- (none)
+
+## Acceptance criteria
+- Users can pause an invoice
+`);
+	assert.deepEqual(withoutQuestions, []);
+});
+
+test("syncQuestionsWithDraft preserves existing answers and closes questions when draft reports none", () => {
+	const state = {
+		active: true,
+		originId: "leaf-1",
+		id: "plan-1",
+		title: "Add recurring invoices",
+		slug: "add-recurring-invoices",
+		originalInput: "Add recurring invoices",
+		status: "drafting",
+		repoRoot: "/repo",
+		createdAt: "2025-01-01T00:00:00.000Z",
+		updatedAt: "2025-01-01T00:00:00.000Z",
+		relevantFiles: [],
+		questions: [{ id: "q-1", question: "Should pause/resume emit audit logs?", answer: "Yes", status: "answered" as const }],
+		assumptions: [],
+		decisions: [],
+	};
+
+	assert.deepEqual(__testables.syncQuestionsWithDraft(state, [
+		{ question: "Should pause/resume emit audit logs?" },
+		{ question: "Should admins be able to edit cadence after creation?" },
+	]), [
+		{ id: "q-1", question: "Should pause/resume emit audit logs?", answer: "Yes", status: "answered" },
+		{ id: "q-2", question: "Should admins be able to edit cadence after creation?", answer: undefined, status: "open" },
+	]);
+
+	assert.deepEqual(__testables.syncQuestionsWithDraft(state, []), [
+		{ id: "q-1", question: "Should pause/resume emit audit logs?", answer: "Yes", status: "answered" },
+	]);
+});
+
+
+test("applyAnswersToQuestions marks answered planning questions from the Q/A transcript", () => {
+	const state = {
+		active: true,
+		originId: "leaf-1",
+		id: "plan-1",
+		title: "Add recurring invoices",
+		slug: "add-recurring-invoices",
+		originalInput: "Add recurring invoices",
+		status: "drafting",
+		repoRoot: "/repo",
+		createdAt: "2025-01-01T00:00:00.000Z",
+		updatedAt: "2025-01-01T00:00:00.000Z",
+		relevantFiles: [],
+		questions: [
+			{ id: "q-1", question: "Should pause/resume emit audit logs?", status: "open" as const },
+			{ id: "q-2", question: "Should admins be able to edit cadence after creation?", status: "open" as const },
+		],
+		assumptions: [],
+		decisions: [],
+	};
+
+	assert.deepEqual(__testables.applyAnswersToQuestions(state, [
+		"Q: Should pause/resume emit audit logs?",
+		"A: Yes, for every state transition.",
+		"",
+		"Q: Should admins be able to edit cadence after creation?",
+		"A: No.",
+	].join("\n")), [
+		{ id: "q-1", question: "Should pause/resume emit audit logs?", answer: "Yes, for every state transition.", status: "answered" },
+		{ id: "q-2", question: "Should admins be able to edit cadence after creation?", answer: "No.", status: "answered" },
+	]);
+});
+
+
+test("plan-done sends a finalization follow-up prompt to the planner when messaging is available", async () => {
+	const commands = new Map<string, (args: string | undefined, ctx: any) => Promise<void>>();
+	const sent: string[] = [];
+	const notifications: string[] = [];
+	planFeatureExtension({
+		on() {},
+		registerCommand(name: string, config: { handler: (args: string | undefined, ctx: any) => Promise<void> }) {
+			commands.set(name, config.handler);
+		},
+		sendUserMessage(message: string) {
+			sent.push(message);
+		},
+	} as any);
+
+	const planDone = commands.get("plan-done");
+	assert.ok(planDone, "expected /plan-done handler");
+	await planDone?.(undefined, {
+		state: {
+			planning: {
+				active: true,
+				originId: "leaf-1",
+				id: "plan-1",
+				title: "Add recurring invoices",
+				slug: "add-recurring-invoices",
+				originalInput: "Add recurring invoices",
+				status: "clarifying",
+				repoRoot: "/repo",
+				createdAt: "2025-01-01T00:00:00.000Z",
+				updatedAt: "2025-01-01T00:00:00.000Z",
+				relevantFiles: [],
+				questions: [],
+				assumptions: [],
+				decisions: [],
+			},
+		},
+		pi: {
+			appendEntry() {
+				return { id: "entry-1" };
+			},
+		},
+		ui: {
+			setEditorText() {},
+			setWidget() {},
+		},
+		notify(message: string) {
+			notifications.push(message);
+		},
+	});
+
+	assert.equal(sent.length, 1);
+	assert.match(sent[0], /stop questioning and finalize the plan/i);
+	assert.ok(notifications.some((message) => /asked the planner to finalize/i.test(message)));
+});
+
 
 test("shouldCaptureDraftUpdate skips finalized planning sessions and unchanged drafts", () => {
 	const state = {
