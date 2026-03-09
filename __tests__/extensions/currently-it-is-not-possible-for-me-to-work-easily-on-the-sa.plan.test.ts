@@ -105,13 +105,26 @@ function historyEntries(ctx: Ctx): Array<Record<string, unknown>> {
 }
 
 function getRegisteredCommands(extension: unknown): Array<{ name: string; handler: CommandHandler }> {
-	if (typeof extension === "function") {
-		const commands = (extension as { commands?: Array<{ name?: string; handler?: CommandHandler }> }).commands;
-		if (Array.isArray(commands)) {
-			return commands.map((command) => ({ name: String(command.name ?? ""), handler: command.handler as CommandHandler }));
-		}
+	if (typeof extension !== "function") {
+		throw new Error("Expected ../../extensions/worktree.ts to export a registration function");
 	}
-	throw new Error("Unable to discover command registration from ../../extensions/worktree.ts");
+
+	const commands: Array<{ name: string; handler: CommandHandler }> = [];
+	(extension as (pi: {
+		registerCommand: (name: string, config: { handler: (args: string | undefined, ctx: Ctx) => Promise<unknown> | unknown }) => void;
+	}) => void)({
+		registerCommand(name, config) {
+			commands.push({
+				name,
+				handler: async (ctx: Ctx, ...args: string[]) => await config.handler(args.join(" ").trim() || undefined, ctx),
+			});
+		},
+	});
+
+	if (commands.length === 0) {
+		throw new Error("Expected ../../extensions/worktree.ts to register commands via registerCommand()");
+	}
+	return commands;
 }
 
 function getCommand(extension: unknown, name: string): CommandHandler {
@@ -135,9 +148,9 @@ test("Add a new extension with /worktree-start, /worktree-pr, and /worktree-clea
 	const commands = getRegisteredCommands(worktreeExtension);
 	const names = commands.map((command) => command.name);
 
-	assert.ok(names.includes("/worktree-start"), "expected /worktree-start command registration");
-	assert.ok(names.includes("/worktree-pr"), "expected /worktree-pr command registration");
-	assert.ok(names.includes("/worktree-cleanup"), "expected /worktree-cleanup command registration");
+	assert.ok(names.includes("worktree-start"), "expected worktree-start command registration");
+	assert.ok(names.includes("worktree-pr"), "expected worktree-pr command registration");
+	assert.ok(names.includes("worktree-cleanup"), "expected worktree-cleanup command registration");
 });
 
 test("/worktree-start creates a managed worktree from main using git worktree, persists metadata/history, attempts PI handoff in target cwd, and avoids model usage", async () => {
@@ -181,6 +194,39 @@ test("/worktree-start creates a managed worktree from main using git worktree, p
 	assert.ok(infoMessages.some((message) => /validat/i.test(message)));
 	assert.ok(infoMessages.some((message) => /creat/i.test(message)));
 	assert.ok(infoMessages.some((message) => /handoff/i.test(message)));
+});
+
+test("/worktree-start persists managed metadata before attempting pi handoff so follow-up commands can discover the new checkout immediately", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const ctx = createCtx();
+	let metadataVisibleDuringHandoff = false;
+	let historyVisibleDuringHandoff = false;
+
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-before-handoff")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === "pi") {
+			const metadata = ctx.artifacts.get(".pi/worktrees/feature-before-handoff.json");
+			const history = ctx.artifacts.get(".pi/worktrees/history.jsonl") ?? "";
+			metadataVisibleDuringHandoff = Boolean(metadata && parseJson<Record<string, unknown>>(metadata).branch === "worktree/feature-before-handoff");
+			historyVisibleDuringHandoff = /"type":"worktree-start"/.test(history) && /"slug":"feature-before-handoff"/.test(history);
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	await startWorktree(ctx, "feature-before-handoff");
+
+	assert.equal(metadataVisibleDuringHandoff, true, "expected metadata to exist before pi handoff begins");
+	assert.equal(historyVisibleDuringHandoff, true, "expected history entry to exist before pi handoff begins");
+	const metadata = parseJson<Record<string, unknown>>(ctx.artifacts.get(".pi/worktrees/feature-before-handoff.json")!);
+	assert.equal(metadata.branch, "worktree/feature-before-handoff");
+	assert.equal((metadata.handoff as Record<string, unknown>)?.ok, true);
 });
 
 test("If automatic handoff fails, /worktree-start still creates the worktree, persists failure details, and shows a usable fallback command", async () => {

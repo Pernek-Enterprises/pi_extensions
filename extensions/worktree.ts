@@ -387,17 +387,14 @@ async function handleWorktreeStart(ctx: Ctx, rawSlug?: string): Promise<Worktree
 			fail(ctx, trimOutput(createResult.stderr) || trimOutput(createResult.stdout) || `git worktree add failed with code ${createResult.code}`);
 		}
 
-		phase = "handoff";
-		info(ctx, `Attempting pi handoff into ${worktreePath}...`);
-		const handoff = await attemptWorktreeHandoff(ctx, worktreePath);
+		const createdAt = new Date().toISOString();
 		const metadata: WorktreeMetadata = {
 			slug,
 			branch,
 			repoRoot,
 			mainCheckoutPath: repoRoot,
 			worktreePath,
-			createdAt: new Date().toISOString(),
-			handoff,
+			createdAt,
 		};
 		await persistMetadata(ctx, metadata);
 		await appendHistory(ctx, {
@@ -406,10 +403,19 @@ async function handleWorktreeStart(ctx: Ctx, rawSlug?: string): Promise<Worktree
 			branch,
 			repoRoot,
 			worktreePath,
-			createdAt: metadata.createdAt,
+			createdAt,
 		});
+
+		phase = "handoff";
+		info(ctx, `Attempting pi handoff into ${worktreePath}...`);
+		const handoff = await attemptWorktreeHandoff(ctx, worktreePath);
+		const nextMetadata: WorktreeMetadata = {
+			...metadata,
+			handoff,
+		};
+		await persistMetadata(ctx, nextMetadata);
 		info(ctx, `Managed worktree ready: ${worktreePath}`);
-		return metadata;
+		return nextMetadata;
 	} catch (error) {
 		const reason = (error as Error).message || "Unknown worktree-start failure";
 		await recordFailure(ctx, { command: "worktree-start", phase, reason }, undefined, { slug, rawSlug: rawSlug ?? null });
@@ -661,7 +667,5 @@ function worktreeExtension(pi?: PiApi) {
 		});
 	}
 }
-
-(worktreeExtension as typeof worktreeExtension & { commands: typeof commands }).commands = commands;
 
 export default worktreeExtension;
