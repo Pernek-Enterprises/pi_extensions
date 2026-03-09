@@ -1,7 +1,6 @@
 import path from "node:path";
 import { promises as fs, accessSync, constants as fsConstants, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 type ExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
@@ -268,56 +267,31 @@ function resolveCommandOnPath(command: string, env: NodeJS.ProcessEnv): string |
 	return undefined;
 }
 
-function findReadablePath(candidates: string[]): string | undefined {
-	for (const candidate of candidates) {
+function findPackageJsonPath(packageName: string): string | undefined {
+	const require = createRequire(import.meta.url);
+	for (const root of require.resolve.paths(packageName) ?? []) {
+		const candidate = path.join(root, packageName, "package.json");
 		try {
 			accessSync(candidate, fsConstants.R_OK);
 			return candidate;
 		} catch {
-			// keep searching
+			// keep searching resolver roots
 		}
-	}
-	return undefined;
-}
-
-function findPackageJsonPath(packageName: string): string | undefined {
-	const require = createRequire(import.meta.url);
-	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-	const searchRoots = [
-		...new Set([process.cwd(), moduleDir, ...(require.resolve.paths(packageName) ?? [])]),
-	];
-	for (const root of searchRoots) {
-		let current = root;
-		while (current && current !== path.dirname(current)) {
-			const candidate = findReadablePath([
-				path.join(current, packageName, "package.json"),
-				path.join(current, "node_modules", packageName, "package.json"),
-			]);
-			if (candidate) return candidate;
-			current = path.dirname(current);
-		}
-		const rootCandidate = findReadablePath([
-			path.join(current, packageName, "package.json"),
-			path.join(current, "node_modules", packageName, "package.json"),
-		]);
-		if (rootCandidate) return rootCandidate;
 	}
 	return undefined;
 }
 
 function resolvePiCliScript(): string | undefined {
+	const packageJsonPath = findPackageJsonPath("@mariozechner/pi-coding-agent");
+	if (!packageJsonPath) return undefined;
 	try {
-		const packageJsonPath = findPackageJsonPath("@mariozechner/pi-coding-agent");
-		if (!packageJsonPath) return undefined;
 		const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { bin?: string | Record<string, string> };
 		const binEntry = typeof packageJson.bin === "string"
 			? packageJson.bin
 			: packageJson.bin && typeof packageJson.bin.pi === "string"
 				? packageJson.bin.pi
 				: undefined;
-		if (!binEntry) return undefined;
-		const cliPath = path.resolve(path.dirname(packageJsonPath), binEntry);
-		return cliPath;
+		return binEntry ? path.resolve(path.dirname(packageJsonPath), binEntry) : undefined;
 	} catch {
 		return undefined;
 	}
