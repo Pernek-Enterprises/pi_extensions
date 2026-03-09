@@ -1,12 +1,16 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
-type ExecResult = { stdout: string; stderr: string; code: number };
-type ExecOptions = Record<string, unknown> | undefined;
+type ExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
+type ExecOptions = { cwd?: string; signal?: AbortSignal; timeout?: number } | undefined;
+type UiContext = {
+	notify?: (message: string, level?: "info" | "warning" | "error" | "success") => void;
+};
 type Ctx = {
 	cwd: string;
+	ui?: UiContext;
 	state?: Record<string, unknown>;
-	exec: (command: string, options?: ExecOptions) => Promise<ExecResult>;
+	exec?: (command: string, options?: ExecOptions) => Promise<ExecResult>;
 	persistArtifact?: (path: string, content: string, options?: { append?: boolean }) => Promise<void>;
 	readArtifact?: (path: string) => Promise<string | undefined>;
 	persistCalls?: Array<{ path: string; content: string; mode?: string }>;
@@ -18,6 +22,12 @@ type Ctx = {
 		ask?: (prompt: string) => Promise<string>;
 	};
 };
+type PiApi = {
+	exec?: (command: string, args: string[], options?: ExecOptions) => Promise<ExecResult>;
+	registerCommand?: (name: string, config: { description?: string; handler: (args: string | undefined, ctx: Ctx) => Promise<unknown> | unknown }) => void;
+};
+
+let runtimePi: PiApi | undefined;
 
 type WorktreeFailure = {
 	command: "worktree-start" | "worktree-pr" | "worktree-cleanup";
@@ -50,14 +60,17 @@ type WorktreeMetadata = {
 };
 
 function info(ctx: Ctx, message: string) {
+	ctx.ui?.notify?.(message, "info");
 	ctx.pi?.notify?.(message);
 }
 
 function warn(ctx: Ctx, message: string) {
+	ctx.ui?.notify?.(message, "warning");
 	ctx.pi?.warn?.(message);
 }
 
 function fail(ctx: Ctx, message: string): never {
+	ctx.ui?.notify?.(message, "error");
 	ctx.pi?.error?.(message);
 	throw new Error(message);
 }
@@ -67,7 +80,9 @@ function trimOutput(value: string | undefined): string {
 }
 
 async function run(ctx: Ctx, command: string, options?: ExecOptions): Promise<ExecResult> {
-	return await ctx.exec(command, options);
+	if (ctx.exec) return await ctx.exec(command, options);
+	if (!runtimePi?.exec) throw new Error("No shell execution API available. Expected pi.exec().");
+	return await runtimePi.exec("bash", ["-lc", command], options);
 }
 
 async function runInCwd(ctx: Ctx, cwd: string, command: string): Promise<ExecResult> {
@@ -201,16 +216,16 @@ async function detectRepoRoot(ctx: Ctx, cwd?: string): Promise<string> {
 }
 
 async function ensureMainCheckout(ctx: Ctx, repoRoot: string): Promise<void> {
-	const branch = trimOutput((await run(ctx, "git branch --show-current")).stdout);
+	const branch = trimOutput((await run(ctx, "git branch --show-current", { cwd: repoRoot })).stdout);
 	if (branch !== "main") fail(ctx, `worktree-start must be run from main. Current branch: ${branch || "(unknown)"}`);
-	const origin = await run(ctx, "git remote get-url origin");
+	const origin = await run(ctx, "git remote get-url origin", { cwd: repoRoot });
 	if (origin.code !== 0 || !trimOutput(origin.stdout)) {
 		fail(ctx, trimOutput(origin.stderr) || "Missing origin remote");
 	}
 }
 
-async function ensureBranchDoesNotExist(ctx: Ctx, branch: string): Promise<void> {
-	const result = await run(ctx, `git show-ref --verify --quiet refs/heads/${branch}`);
+async function ensureBranchDoesNotExist(ctx: Ctx, branch: string, cwd?: string): Promise<void> {
+	const result = await run(ctx, `git show-ref --verify --quiet refs/heads/${branch}`, cwd ? { cwd } : undefined);
 	if (result.code === 0) fail(ctx, `Managed branch already exists: ${branch}`);
 }
 
@@ -218,8 +233,8 @@ function porcelainWorktreeExistsAt(stdout: string, targetPath: string): boolean 
 	return stdout.split(/\r?\n/).some((line) => line.trim() === `worktree ${targetPath}`);
 }
 
-async function ensureTargetPathAvailable(ctx: Ctx, worktreePath: string): Promise<void> {
-	const result = await run(ctx, "git worktree list --porcelain");
+async function ensureTargetPathAvailable(ctx: Ctx, worktreePath: string, cwd?: string): Promise<void> {
+	const result = await run(ctx, "git worktree list --porcelain", cwd ? { cwd } : undefined);
 	if (porcelainWorktreeExistsAt(result.stdout, worktreePath)) {
 		fail(ctx, `Target worktree path already exists and appears unmanaged: ${worktreePath}`);
 	}
@@ -259,12 +274,12 @@ async function handleWorktreeStart(ctx: Ctx, rawSlug?: string): Promise<Worktree
 		const worktreePath = getWorktreePath(repoRoot, slug);
 
 		if (await readMetadata(ctx, slug)) fail(ctx, `Managed metadata already exists for slug ${slug}`);
-		await ensureBranchDoesNotExist(ctx, branch);
-		await ensureTargetPathAvailable(ctx, worktreePath);
+		await ensureBranchDoesNotExist(ctx, branch, repoRoot);
+		await ensureTargetPathAvailable(ctx, worktreePath, repoRoot);
 
 		phase = "create";
 		info(ctx, `Creating managed worktree ${branch} at ${worktreePath}...`);
-		await run(ctx, `git worktree add ${JSON.stringify(worktreePath)} -b ${branch} main`);
+		await run(ctx, `git worktree add ${JSON.stringify(worktreePath)} -b ${branch} main`, { cwd: repoRoot });
 
 		phase = "handoff";
 		info(ctx, `Attempting pi handoff into ${worktreePath}...`);
@@ -287,6 +302,7 @@ async function handleWorktreeStart(ctx: Ctx, rawSlug?: string): Promise<Worktree
 			worktreePath,
 			createdAt: metadata.createdAt,
 		});
+		info(ctx, `Managed worktree ready: ${worktreePath}`);
 		return metadata;
 	} catch (error) {
 		const reason = (error as Error).message || "Unknown worktree-start failure";
@@ -354,6 +370,18 @@ async function lookupExistingPr(ctx: Ctx, cwd: string, branch: string): Promise<
 	return undefined;
 }
 
+async function getGeneratedTexts(ctx: Ctx, metadata: WorktreeMetadata, branch: string, diffStat: string, diffPreview: string) {
+	const prompt = [
+		`You are preparing commit and PR text for managed worktree ${metadata.slug}.`,
+		"Return exactly three sections separated by blank lines: commit message, PR title, PR body.",
+		`Branch: ${branch}`,
+		`Worktree path: ${metadata.worktreePath}`,
+		diffStat ? `Diff stat:\n${diffStat}` : "Working tree is clean.",
+		diffPreview ? `Diff preview:\n${diffPreview}` : "",
+	].filter(Boolean).join("\n\n");
+	return parseGeneratedTexts(await ctx.pi?.ask?.(prompt), metadata.slug);
+}
+
 async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
 	const cwd = ctx.cwd;
 	let phase = "validate";
@@ -377,14 +405,7 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
 		}
 
 		phase = "commit";
-		const generatedTexts = parseGeneratedTexts(await ctx.pi?.ask?.([
-			`You are preparing commit and PR text for managed worktree ${metadata.slug}.`,
-			`Return exactly three sections separated by blank lines: commit message, PR title, PR body.`,
-			`Branch: ${branch}`,
-			`Worktree path: ${metadata.worktreePath}`,
-			diffStat ? `Diff stat:\n${diffStat}` : "Working tree is clean.",
-			diffPreview ? `Diff preview:\n${diffPreview}` : "",
-		].filter(Boolean).join("\n\n")), metadata.slug);
+		const generatedTexts = await getGeneratedTexts(ctx, metadata, branch, diffStat, diffPreview);
 
 		let commitStatus = "skipped-clean";
 		if (hasChanges) {
@@ -511,9 +532,10 @@ const commands = [
 		registerName: "worktree-cleanup",
 		handler: async (ctx: Ctx) => await handleWorktreeCleanup(ctx),
 	},
-];
+] as const;
 
-function worktreeExtension(pi?: { registerCommand?: (name: string, config: { description?: string; handler: (args: string | undefined, ctx: Ctx) => Promise<unknown> | unknown }) => void }) {
+function worktreeExtension(pi?: PiApi) {
+	runtimePi = pi;
 	for (const command of commands) {
 		pi?.registerCommand?.(command.registerName, {
 			description: `Managed git worktree command ${command.name}`,
