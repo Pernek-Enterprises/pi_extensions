@@ -89,6 +89,7 @@ type LoopIterationRecord = {
 	stagedOutputPath: string;
 	coveragePath: string;
 	findingsPath: string;
+	findingsSummaryPath?: string;
 	generatorMetadataPath: string;
 	coveredRequirements: string[];
 	ambiguousRequirements: string[];
@@ -159,7 +160,9 @@ Rules:
 - Reuse local test idioms, imports, setup style, and folder conventions when examples are provided.
 - Favor the strongest realistic acceptance criteria you can infer from the plan goal and repository context.
 - If a requirement is vague, still create the best failing behavioral acceptance test you can, and list it in ambiguousRequirements.
-- When prior assessment findings are provided, treat them as concrete defects to fix in the next iteration.
+- When prior assessment findings are provided, treat them as a mandatory fix queue: address each finding explicitly, remove the cited bad patterns, and strengthen the exact missing behaviors called out by the reviewer.
+- Rewrite freely when needed. Do not preserve broken structure just because it existed in the previous iteration.
+- Use notes to briefly record how you resolved the prior findings or which ambiguity still blocks stronger tests.
 - Return raw JSON only. No markdown fences.`;
 
 const ASSESSOR_SYSTEM_PROMPT = `You are an independent reviewer of generated TypeScript tests created from a markdown implementation plan.
@@ -184,10 +187,13 @@ Return strict JSON with this shape:
 
 Rules:
 - Review the generated tests, the plan, repository context, and generator metadata together.
+- Behave like a code reviewer: identify discrete, actionable findings that another round can fix.
+- Only return verdict="pass" when you would be comfortable stopping the loop now.
+- If verdict="fail", findings must contain at least one actionable item. Keep the list short and high-signal (ideally 1-5 findings).
+- Each finding should explain impact, include concrete evidence from the generated tests when possible, and give an imperative fix instruction.
 - Fail the suite when it contains superficial source scanning tests, file-content assertions, regex checks against source/markdown, missing major behavioral coverage, unrealistic/non-executable harness assumptions, or weak assertions that do not prove behavior.
 - Prefer the strongest realistic behavioral tests supported by the repository evidence; do not require full E2E coverage when the repo does not support it.
 - If the plan is vague, report ambiguity as a finding instead of passing the suite.
-- Keep findings concrete and actionable so another generation round can fix them.
 - Return raw JSON only. No markdown fences.`;
 
 const MAX_PLAN_CHARS = 24_000;
@@ -719,6 +725,68 @@ function buildRepoSummary(framework: TestFramework, repoContext: RepoContext): s
 	);
 }
 
+function formatAssessmentFinding(finding: AssessorFinding, index: number): string {
+	return [
+		`${index + 1}. [${finding.category}/${finding.severity}] ${finding.title}`,
+		`   Why this matters: ${finding.details}`,
+		`   Required fix: ${finding.fix}`,
+		finding.requirement ? `   Requirement: ${finding.requirement}` : undefined,
+		finding.evidence?.length ? `   Evidence: ${finding.evidence.join(" | ")}` : undefined,
+	].filter(Boolean).join("\n");
+}
+
+function buildAssessmentFeedbackPrompt(assessment: AssessmentResult, priorTestCode?: string): string {
+	const findings = assessment.findings.length > 0
+		? assessment.findings.map((finding, index) => formatAssessmentFinding(finding, index)).join("\n\n")
+		: "- No actionable findings were returned.";
+	const fixQueue = assessment.findings.length > 0
+		? assessment.findings.map((finding, index) => `- Fix ${index + 1}: ${finding.fix}`).join("\n")
+		: "- No fix queue provided.";
+
+	return [
+		"Previous round review (treat this as a mandatory fix queue):",
+		`Overall verdict: ${assessment.verdict === "pass" ? "correct" : "needs attention"}`,
+		`Summary: ${assessment.summary}`,
+		"",
+		"Findings:",
+		findings,
+		"",
+		"Fix queue:",
+		fixQueue,
+		"",
+		"Revision instructions:",
+		"- Address every finding directly.",
+		"- Remove any cited superficial assertions, unrealistic harness assumptions, or missing coverage gaps.",
+		"- Rewrite the test file freely if that is the simplest way to close the findings.",
+		priorTestCode ? `\nPrevious staged test file to improve (do not preserve bad patterns blindly):\n\n${priorTestCode}` : undefined,
+	].filter(Boolean).join("\n");
+}
+
+function renderAssessmentSummary(assessment: AssessmentResult): string {
+	const findings = assessment.findings.length > 0
+		? assessment.findings.map((finding, index) => `- ${index + 1}. ${finding.title} (${finding.category}/${finding.severity})`).join("\n")
+		: "- No actionable findings.";
+	const strengths = assessment.strengths?.length
+		? assessment.strengths.map((item) => `- ${item}`).join("\n")
+		: "- None recorded.";
+	const fixQueue = assessment.findings.length > 0
+		? assessment.findings.map((finding, index) => `- ${index + 1}. ${finding.fix}`).join("\n")
+		: "- No fixes required.";
+	return [
+		`Verdict: ${assessment.verdict === "pass" ? "correct" : "needs attention"}`,
+		`Summary: ${assessment.summary}`,
+		"",
+		"Findings:",
+		findings,
+		"",
+		"Strengths:",
+		strengths,
+		"",
+		"Fix queue:",
+		fixQueue,
+	].join("\n");
+}
+
 async function generateWithModel(
 	ctx: ExtensionContext,
 	framework: TestFramework,
@@ -753,7 +821,7 @@ async function generateWithModel(
 		: "(none extracted; infer the intended feature behavior from the full markdown)";
 
 	const improvementContext = options.assessment
-		? `\n\nAssessment findings from the previous iteration (fix these concretely):\nSummary: ${options.assessment.summary}\n${options.assessment.findings.length > 0 ? options.assessment.findings.map((finding, index) => `${index + 1}. [${finding.category}/${finding.severity}] ${finding.title}\n- Details: ${finding.details}\n- Fix: ${finding.fix}${finding.requirement ? `\n- Requirement: ${finding.requirement}` : ""}${finding.evidence?.length ? `\n- Evidence: ${finding.evidence.join(" | ")}` : ""}`).join("\n") : "- No explicit findings were provided."}${options.priorTestCode ? `\n\nPrevious staged test file to improve (do not preserve bad patterns blindly):\n\n${options.priorTestCode}` : ""}`
+		? `\n\n${buildAssessmentFeedbackPrompt(options.assessment, options.priorTestCode)}`
 		: "";
 
 	const userPrompt = `Framework: ${framework === "unknown" ? "Prefer Vitest but mirror local conventions" : framework}
@@ -832,6 +900,15 @@ function normalizeAssessment(result: AssessmentResult | null): AssessmentResult 
 			}))
 			.filter((finding) => finding.title && finding.details)
 		: [];
+	if (result.verdict === "fail" && findings.length === 0) {
+		findings.push({
+			category: "other",
+			severity: "high",
+			title: "Assessment returned fail without actionable findings",
+			details: "The reviewer said the suite still needs attention but did not provide any concrete defects to fix.",
+			fix: "Re-review the generated tests and return at least one discrete actionable finding with evidence and a concrete fix.",
+		});
+	}
 	return {
 		verdict: result.verdict === "pass" && findings.length === 0 ? "pass" : findings.length > 0 ? "fail" : result.verdict,
 		summary: result.summary || (findings.length === 0 ? "No issues found." : "Issues found."),
@@ -1085,6 +1162,7 @@ function buildLoopIterationPaths(rootDir: string, planPath: string, repoContext:
 	stagedOutputPath: string;
 	coveragePath: string;
 	findingsPath: string;
+	findingsSummaryPath: string;
 	generatorMetadataPath: string;
 } {
 	const baseDir = buildLoopArtifactsBaseDir(rootDir, planPath);
@@ -1096,6 +1174,7 @@ function buildLoopIterationPaths(rootDir: string, planPath: string, repoContext:
 		stagedOutputPath: path.join(baseDir, `${baseName}.iteration-${iteration}${ext}`),
 		coveragePath: path.join(baseDir, `iteration-${iteration}.coverage.json`),
 		findingsPath: path.join(baseDir, `iteration-${iteration}.findings.json`),
+		findingsSummaryPath: path.join(baseDir, `iteration-${iteration}.findings.md`),
 		generatorMetadataPath: path.join(baseDir, `iteration-${iteration}.generator.json`),
 	};
 }
@@ -1634,12 +1713,15 @@ async function runTddPlanLoop(
 			assessment.verdict = "fail";
 		}
 		await writeJson(iterationPaths.findingsPath, assessment);
+		await ensureDir(iterationPaths.findingsSummaryPath);
+		await fs.writeFile(iterationPaths.findingsSummaryPath, renderAssessmentSummary(assessment) + "\n", "utf8");
 
 		const iterationRecord: LoopIterationRecord = {
 			iteration,
 			stagedOutputPath: path.relative(rootDir, iterationPaths.stagedOutputPath),
 			coveragePath: path.relative(rootDir, iterationPaths.coveragePath),
 			findingsPath: path.relative(rootDir, iterationPaths.findingsPath),
+			findingsSummaryPath: path.relative(rootDir, iterationPaths.findingsSummaryPath),
 			generatorMetadataPath: path.relative(rootDir, iterationPaths.generatorMetadataPath),
 			coveredRequirements: generated.coveredRequirements,
 			ambiguousRequirements: generated.ambiguousRequirements ?? [],
@@ -1675,6 +1757,13 @@ async function runTddPlanLoop(
 		}
 
 		notify(ctx, `TDD loop round ${iteration}: ${assessment.findings.length} finding(s)`, "warning");
+		if (assessment.findings.length > 0) {
+			const topFindings = assessment.findings
+				.slice(0, 3)
+				.map((finding, index) => `${index + 1}. ${finding.title} — ${finding.fix}`)
+				.join("\n");
+			notify(ctx, topFindings, "warning");
+		}
 		if (loopMode === "ask-each-round" && ctx.hasUI && typeof ctx.ui.select === "function") {
 			const choice = await ctx.ui.select("Current generated tests still have findings:", ["Continue fixing", "Accept current staged tests", "Cancel loop"]);
 			if (!choice || choice === "Cancel loop") {
@@ -1782,6 +1871,10 @@ async function runTddPlanLoop(
 export const __testables = {
 	systemPrompt: SYSTEM_PROMPT,
 	assessorSystemPrompt: ASSESSOR_SYSTEM_PROMPT,
+	formatAssessmentFinding,
+	buildAssessmentFeedbackPrompt,
+	renderAssessmentSummary,
+	normalizeAssessment,
 	detectFramework,
 	getConfigTestEntries,
 	inferTestDirectoriesFromText,

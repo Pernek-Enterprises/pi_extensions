@@ -286,4 +286,13 @@ test("system prompt explicitly forbids tests against plan markdown itself", () =
 	assert.match(__testables.systemPrompt, /markdown headings/i);
 	assert.match(__testables.systemPrompt, /documentation content/i);
 	assert.match(__testables.systemPrompt, /intended product or system behavior/i);
+	assert.match(__testables.systemPrompt, /mandatory fix queue/i);
+	assert.match(__testables.systemPrompt, /rewrite freely when needed/i);
+});
+
+test("assessor prompt requires discrete actionable findings and only passes when the loop should stop", () => {
+	assert.match(__testables.assessorSystemPrompt, /behave like a code reviewer/i);
+	assert.match(__testables.assessorSystemPrompt, /only return verdict="pass" when you would be comfortable stopping the loop now/i);
+	assert.match(__testables.assessorSystemPrompt, /findings must contain at least one actionable item/i);
+	assert.match(__testables.assessorSystemPrompt, /concrete evidence/i);
 });

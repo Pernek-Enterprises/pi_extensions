@@ -86,6 +86,7 @@ test("buildLoopIterationPaths stages iteration artifacts under .pi/generated-tdd
 	assert.equal(paths.stagedOutputPath, "/repo/.pi/generated-tdd/feature-plan/feature-plan.plan.spec.iteration-2.ts");
 	assert.equal(paths.coveragePath, "/repo/.pi/generated-tdd/feature-plan/iteration-2.coverage.json");
 	assert.equal(paths.findingsPath, "/repo/.pi/generated-tdd/feature-plan/iteration-2.findings.json");
+	assert.equal(paths.findingsSummaryPath, "/repo/.pi/generated-tdd/feature-plan/iteration-2.findings.md");
 });
 
 test("loop state helpers persist, restore, and clear active loop state", async () => {
@@ -255,6 +256,67 @@ test("assessment isolation helpers branch to a dedicated assessment session and 
 
 	await __testables.returnFromAssessmentIsolationBranch(ctx, started.originId);
 	assert.deepEqual(navigations[1], { targetId: "origin-leaf", options: { summarize: false } });
+});
+
+test("buildAssessmentFeedbackPrompt turns findings into a review-style fix queue", () => {
+	const prompt = __testables.buildAssessmentFeedbackPrompt({
+		verdict: "fail",
+		summary: "Still too superficial.",
+		findings: [
+			{
+				category: "superficial-source-tests",
+				severity: "high",
+				title: "Reads markdown instead of behavior",
+				details: "The suite reads the plan file and asserts on its contents.",
+				fix: "Replace plan-file assertions with runtime behavior checks.",
+				requirement: "users can pause recurring invoices",
+				evidence: ["readFileSync('.pi/plans/feature.plan.md')"],
+			},
+		],
+		strengths: ["Uses the local node:test style."],
+	}, "test code here");
+
+	assert.match(prompt, /mandatory fix queue/i);
+	assert.match(prompt, /Overall verdict: needs attention/i);
+	assert.match(prompt, /Reads markdown instead of behavior/);
+	assert.match(prompt, /Required fix: Replace plan-file assertions with runtime behavior checks/i);
+	assert.match(prompt, /Previous staged test file to improve/i);
+});
+
+test("normalizeAssessment creates an actionable finding when the assessor says fail without findings", () => {
+	const normalized = __testables.normalizeAssessment({
+		verdict: "fail",
+		summary: "Needs more work.",
+		findings: [],
+		strengths: [],
+	});
+
+	assert.equal(normalized.verdict, "fail");
+	assert.equal(normalized.findings.length, 1);
+	assert.match(normalized.findings[0]?.title ?? "", /fail without actionable findings/i);
+});
+
+test("renderAssessmentSummary produces a concise human-readable review report", () => {
+	const summary = __testables.renderAssessmentSummary({
+		verdict: "fail",
+		summary: "2 issues remain.",
+		findings: [
+			{
+				category: "missing-major-plan-coverage",
+				severity: "medium",
+				title: "Missing pause/resume coverage",
+				details: "No test proves pause/resume behavior.",
+				fix: "Add explicit pause/resume behavior tests.",
+			},
+		],
+		strengths: ["Uses realistic repository seams."],
+	});
+
+	assert.match(summary, /^Verdict: needs attention/m);
+	assert.match(summary, /^Findings:$/m);
+	assert.match(summary, /Missing pause\/resume coverage/);
+	assert.match(summary, /^Fix queue:$/m);
+	assert.match(summary, /Add explicit pause\/resume behavior tests/);
 });
 
 test("extension registers tdd-plan, tdd-plan-loop, and tdd-plan-status commands", () => {
