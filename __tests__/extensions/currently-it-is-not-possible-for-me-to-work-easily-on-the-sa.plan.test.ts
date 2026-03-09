@@ -13,6 +13,11 @@ type PromptCall = { prompt: string };
 type Ctx = {
 	cwd: string;
 	args?: string[];
+	hasUI?: boolean;
+	ui?: {
+		custom?: <T>(renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => Promise<T>;
+	};
+	spawnInteractive?: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdio: "inherit" }) => { status: number | null; stdout?: Buffer; stderr?: Buffer; error?: Error; signal?: NodeJS.Signals | null };
 	state: Record<string, unknown>;
 	execCalls: ExecCall[];
 	notices: Notice[];
@@ -194,6 +199,65 @@ test("If automatic handoff fails, /worktree-start still creates the worktree, pe
 	assert.equal((metadata.handoff as Record<string, unknown>)?.ok, false);
 	assert.match(String((metadata.handoff as Record<string, unknown>)?.reason ?? ""), /process exited immediately/i);
 	assert.match(messagesAtLevel(ctx, "warn").join("\n"), /cd .*feature-b.*&& pi/i);
+});
+
+test("Interactive /worktree-start handoff uses a real terminal launch instead of non-interactive exec", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	let stopCalled = 0;
+	let startCalled = 0;
+	let renderCalled = 0;
+	const ctx = createCtx({
+		hasUI: true,
+		ui: {
+			custom: async <T>(renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => {
+				let result!: T;
+				renderer(
+					{
+						stop: () => {
+							stopCalled += 1;
+						},
+						start: () => {
+							startCalled += 1;
+						},
+						requestRender: () => {
+							renderCalled += 1;
+						},
+					},
+					null,
+					null,
+					(value: T) => {
+						result = value;
+					},
+				);
+				return result;
+			},
+		},
+		spawnInteractive: (command, args, options) => {
+			ctx.execCalls.push({ command: `${command} ${args.join(" ")}`.trim(), options });
+			return { status: 0, stdout: Buffer.from(""), stderr: Buffer.from(""), signal: null };
+		},
+	});
+
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-ui")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === "pi") throw new Error("interactive handoff should not use ctx.exec");
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	await startWorktree(ctx, "feature-ui");
+
+	assert.equal(stopCalled, 1);
+	assert.equal(startCalled, 1);
+	assert.equal(renderCalled, 1);
+	const handoffCall = ctx.execCalls.find((call) => call.command === "pi");
+	assert.ok(handoffCall, "expected interactive handoff to launch pi");
+	assert.equal(handoffCall?.options?.cwd, "/parallel/.worktrees/repo/feature-ui");
 });
 
 test("Representative /worktree-start validation failures reject before creation and append auditable failure reasons to history", async () => {

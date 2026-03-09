@@ -1,16 +1,20 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 type ExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
 type ExecOptions = { cwd?: string; signal?: AbortSignal; timeout?: number } | undefined;
 type UiContext = {
 	notify?: (message: string, level?: "info" | "warning" | "error" | "success") => void;
+	custom?: <T>(renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => Promise<T>;
 };
 type Ctx = {
 	cwd: string;
+	hasUI?: boolean;
 	ui?: UiContext;
 	state?: Record<string, unknown>;
 	exec?: (command: string, options?: ExecOptions) => Promise<ExecResult>;
+	spawnInteractive?: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdio: "inherit" }) => SpawnSyncReturns<Buffer>;
 	persistArtifact?: (path: string, content: string, options?: { append?: boolean }) => Promise<void>;
 	readArtifact?: (path: string) => Promise<string | undefined>;
 	persistCalls?: Array<{ path: string; content: string; mode?: string }>;
@@ -244,9 +248,43 @@ function buildFallbackPiCommand(worktreePath: string): string {
 	return `cd ${JSON.stringify(worktreePath)} && pi`;
 }
 
+function getSpawnResultReason(result: SpawnSyncReturns<Buffer>): string {
+	return trimOutput(result.stderr?.toString("utf8")) || trimOutput(result.stdout?.toString("utf8")) || result.error?.message || (result.signal ? `pi terminated by signal ${result.signal}` : `pi exited with code ${result.status ?? 1}`);
+}
+
+async function runPiWithTerminalHandoff(
+	ctx: Ctx,
+	worktreePath: string,
+	onFailure: (reason: string) => string = (reason) => `Automatic pi handoff failed for ${worktreePath}. Fallback: ${buildFallbackPiCommand(worktreePath)}. Reason: ${reason}`,
+): Promise<WorktreeMetadata["handoff"]> {
+	const command = "pi";
+	const spawn = ctx.spawnInteractive ?? spawnSync;
+	let spawnResult: SpawnSyncReturns<Buffer> | undefined;
+
+	const exitCode = await ctx.ui!.custom!<number | null>((tui, _theme, _keybindings, done) => {
+		tui.stop?.();
+		process.stdout.write("\x1b[2J\x1b[H");
+		spawnResult = spawn(command, [], {
+			cwd: worktreePath,
+			env: process.env,
+			stdio: "inherit",
+		});
+		tui.start?.();
+		tui.requestRender?.(true);
+		done(spawnResult.status ?? (spawnResult.error || spawnResult.signal ? 1 : 0));
+		return { render: () => [], invalidate: () => {} };
+	});
+
+	if (exitCode === 0) return { attempted: true, ok: true, command };
+	const reason = spawnResult ? getSpawnResultReason(spawnResult) : `pi exited with code ${exitCode ?? 1}`;
+	warn(ctx, onFailure(reason));
+	return { attempted: true, ok: false, reason, command };
+}
+
 async function attemptWorktreeHandoff(ctx: Ctx, worktreePath: string): Promise<WorktreeMetadata["handoff"]> {
 	const command = "pi";
 	try {
+		if (ctx.hasUI && ctx.ui?.custom) return await runPiWithTerminalHandoff(ctx, worktreePath);
 		const result = await run(ctx, command, { cwd: worktreePath });
 		if (result.code === 0) {
 			return { attempted: true, ok: true, command };
@@ -469,6 +507,14 @@ async function ensureSafeToCleanup(ctx: Ctx, cwd: string): Promise<void> {
 
 async function attemptReturnToMain(ctx: Ctx, repoRoot: string): Promise<void> {
 	try {
+		if (ctx.hasUI && ctx.ui?.custom) {
+			await runPiWithTerminalHandoff(
+				ctx,
+				repoRoot,
+				(reason) => `Cleanup finished. Return to main checkout at ${repoRoot}. Fallback: cd ${JSON.stringify(repoRoot)} && pi. Reason: ${reason}`,
+			);
+			return;
+		}
 		const result = await run(ctx, "pi", { cwd: repoRoot });
 		if (result.code === 0) return;
 		warn(ctx, `Cleanup finished. Return to main checkout at ${repoRoot}. Fallback: cd ${JSON.stringify(repoRoot)} && pi`);
