@@ -498,21 +498,31 @@ async function handleWorktreeCleanup(ctx: Ctx): Promise<WorktreeMetadata> {
 const commands = [
 	{
 		name: "/worktree-start",
+		registerName: "worktree-start",
 		handler: async (ctx: Ctx, slug?: string) => await handleWorktreeStart(ctx, slug),
 	},
 	{
 		name: "/worktree-pr",
+		registerName: "worktree-pr",
 		handler: async (ctx: Ctx) => await handleWorktreePr(ctx),
 	},
 	{
 		name: "/worktree-cleanup",
+		registerName: "worktree-cleanup",
 		handler: async (ctx: Ctx) => await handleWorktreeCleanup(ctx),
 	},
 ];
 
-function worktreeExtension(_pi?: { command?: (name: string, handler: (...args: unknown[]) => unknown) => void }) {
+function worktreeExtension(pi?: { registerCommand?: (name: string, config: { description?: string; handler: (args: string | undefined, ctx: Ctx) => Promise<unknown> | unknown }) => void }) {
 	for (const command of commands) {
-		_pi?.command?.(command.name, command.handler as (...args: unknown[]) => unknown);
+		pi?.registerCommand?.(command.registerName, {
+			description: `Managed git worktree command ${command.name}`,
+			handler: async (args, ctx) => {
+				const trimmedArgs = args?.trim();
+				if (command.registerName === "worktree-start") return await command.handler(ctx, trimmedArgs);
+				return await command.handler(ctx);
+			},
+		});
 	}
 }
 
