@@ -37,6 +37,13 @@ type Ctx = {
 
 type CommandHandler = (ctx: Ctx, ...args: string[]) => Promise<unknown> | unknown;
 
+const TEST_WORKTREE_ROOT = "/tmp/pi-worktrees";
+process.env.PI_WORKTREE_ROOT = TEST_WORKTREE_ROOT;
+
+function worktreePath(slug: string): string {
+	return `${TEST_WORKTREE_ROOT}/repo/${slug}`;
+}
+
 function createCtx(overrides: Partial<Ctx> = {}): Ctx {
 	const execCalls: ExecCall[] = [];
 	const notices: Notice[] = [];
@@ -159,13 +166,13 @@ test("/worktree-start creates a managed worktree from main using git worktree, p
 
 	const handoffCall = ctx.execCalls.find((call) => call.command === "pi");
 	assert.ok(handoffCall, "expected automatic PI handoff attempt");
-	assert.equal(handoffCall?.options?.cwd, "/parallel/.worktrees/repo/feature-a");
+	assert.equal(handoffCall?.options?.cwd, worktreePath("feature-a"));
 	assert.ok(ctx.execCalls.findIndex((call) => call.command.startsWith("git worktree add ")) < ctx.execCalls.findIndex((call) => call.command === "pi"), "expected handoff after creation");
 
 	const metadata = parseJson<Record<string, unknown>>(ctx.artifacts.get(".pi/worktrees/feature-a.json")!);
 	assert.equal(metadata.slug, "feature-a");
 	assert.equal(metadata.branch, "worktree/feature-a");
-	assert.equal(metadata.worktreePath, "/parallel/.worktrees/repo/feature-a");
+	assert.equal(metadata.worktreePath, worktreePath("feature-a"));
 
 	const history = historyEntries(ctx);
 	assert.ok(history.some((entry) => entry.type === "worktree-start" && entry.slug === "feature-a"));
@@ -199,6 +206,29 @@ test("If automatic handoff fails, /worktree-start still creates the worktree, pe
 	assert.equal((metadata.handoff as Record<string, unknown>)?.ok, false);
 	assert.match(String((metadata.handoff as Record<string, unknown>)?.reason ?? ""), /process exited immediately/i);
 	assert.match(messagesAtLevel(ctx, "warn").join("\n"), /cd .*feature-b.*&& pi/i);
+});
+
+test("/worktree-start fails immediately when git worktree add fails and does not persist fake success metadata", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const ctx = createCtx();
+
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-create-fail")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "fatal: could not create leading directories", code: 128 };
+		if (command === "pi") throw new Error("handoff must not run after failed worktree creation");
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	await assert.rejects(() => Promise.resolve(startWorktree(ctx, "feature-create-fail")), /leading directories|git worktree add failed/i);
+	assert.equal(ctx.artifacts.get(".pi/worktrees/feature-create-fail.json"), undefined);
+	assert.ok(!messagesAtLevel(ctx, "info").some((message) => /Managed worktree ready/i.test(message)));
+	assert.ok(!ctx.execCalls.some((call) => call.command === "pi"));
+	assert.ok(historyEntries(ctx).some((entry) => entry.type === "worktree-start-failed" && entry.phase === "create" && /leading directories/i.test(String(entry.reason))));
 });
 
 test("Interactive /worktree-start handoff uses a real terminal launch instead of non-interactive exec", async () => {
@@ -257,7 +287,7 @@ test("Interactive /worktree-start handoff uses a real terminal launch instead of
 	assert.equal(renderCalled, 1);
 	const handoffCall = ctx.execCalls.find((call) => call.command === "pi" || String(call.command).endsWith("/pi") || String(call.command).endsWith("/node"));
 	assert.ok(handoffCall, "expected interactive handoff to launch pi");
-	assert.equal(handoffCall?.options?.cwd, "/parallel/.worktrees/repo/feature-ui");
+	assert.equal(handoffCall?.options?.cwd, worktreePath("feature-ui"));
 });
 
 test("Interactive /worktree-start handoff falls back to the installed CLI script when pi is not on PATH", async () => {
@@ -300,7 +330,7 @@ test("Interactive /worktree-start handoff falls back to the installed CLI script
 
 	const handoffCall = ctx.execCalls.find((call) => String(call.command).includes("dist/cli.js"));
 	assert.ok(handoffCall, "expected interactive handoff to fall back to the resolved pi CLI script");
-	assert.equal(handoffCall?.options?.cwd, "/parallel/.worktrees/repo/feature-ui-pathless");
+	assert.equal(handoffCall?.options?.cwd, worktreePath("feature-ui-pathless"));
 });
 
 test("Representative /worktree-start validation failures reject before creation and append auditable failure reasons to history", async () => {
@@ -332,7 +362,7 @@ test("Duplicate slug metadata, duplicate branch, and existing unmanaged target p
 	const startWorktree = getCommand(worktreeExtension, "worktree-start");
 
 	const duplicateMetadata = createCtx();
-	seedArtifact(duplicateMetadata, ".pi/worktrees/feature-meta.json", { slug: "feature-meta", branch: "worktree/feature-meta", worktreePath: "/parallel/.worktrees/repo/feature-meta" });
+	seedArtifact(duplicateMetadata, ".pi/worktrees/feature-meta.json", { slug: "feature-meta", branch: "worktree/feature-meta", worktreePath: worktreePath("feature-meta") });
 	duplicateMetadata.exec = async (command: string, options?: Record<string, unknown>) => {
 		duplicateMetadata.execCalls.push({ command, options });
 		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
@@ -361,7 +391,7 @@ test("Duplicate slug metadata, duplicate branch, and existing unmanaged target p
 		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
 		if (command.includes("show-ref") && command.includes("worktree/feature-path")) return { stdout: "", stderr: "", code: 1 };
 		if (command === "git worktree list --porcelain") {
-			return { stdout: ["worktree /repo", "branch refs/heads/main", "", "worktree /parallel/.worktrees/repo/feature-path", "branch refs/heads/other"].join("\n"), stderr: "", code: 0 };
+			return { stdout: ["worktree /repo", "branch refs/heads/main", "", `worktree ${worktreePath("feature-path")}`, "branch refs/heads/other"].join("\n"), stderr: "", code: 0 };
 		}
 		throw new Error(`Unexpected exec: ${command}`);
 	};
