@@ -1,5 +1,7 @@
 import path from "node:path";
-import { promises as fs } from "node:fs";
+import { promises as fs, accessSync, constants as fsConstants, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 type ExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
@@ -248,6 +250,87 @@ function buildFallbackPiCommand(worktreePath: string): string {
 	return `cd ${JSON.stringify(worktreePath)} && pi`;
 }
 
+function isExecutableFile(filePath: string): boolean {
+	try {
+		accessSync(filePath, fsConstants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function resolveCommandOnPath(command: string, env: NodeJS.ProcessEnv): string | undefined {
+	const pathValue = env.PATH ?? process.env.PATH ?? "";
+	for (const segment of pathValue.split(path.delimiter).filter(Boolean)) {
+		const candidate = path.join(segment, command);
+		if (isExecutableFile(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+function findReadablePath(candidates: string[]): string | undefined {
+	for (const candidate of candidates) {
+		try {
+			accessSync(candidate, fsConstants.R_OK);
+			return candidate;
+		} catch {
+			// keep searching
+		}
+	}
+	return undefined;
+}
+
+function findPackageJsonPath(packageName: string): string | undefined {
+	const require = createRequire(import.meta.url);
+	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+	const searchRoots = [
+		...new Set([process.cwd(), moduleDir, ...(require.resolve.paths(packageName) ?? [])]),
+	];
+	for (const root of searchRoots) {
+		let current = root;
+		while (current && current !== path.dirname(current)) {
+			const candidate = findReadablePath([
+				path.join(current, packageName, "package.json"),
+				path.join(current, "node_modules", packageName, "package.json"),
+			]);
+			if (candidate) return candidate;
+			current = path.dirname(current);
+		}
+		const rootCandidate = findReadablePath([
+			path.join(current, packageName, "package.json"),
+			path.join(current, "node_modules", packageName, "package.json"),
+		]);
+		if (rootCandidate) return rootCandidate;
+	}
+	return undefined;
+}
+
+function resolvePiCliScript(): string | undefined {
+	try {
+		const packageJsonPath = findPackageJsonPath("@mariozechner/pi-coding-agent");
+		if (!packageJsonPath) return undefined;
+		const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { bin?: string | Record<string, string> };
+		const binEntry = typeof packageJson.bin === "string"
+			? packageJson.bin
+			: packageJson.bin && typeof packageJson.bin.pi === "string"
+				? packageJson.bin.pi
+				: undefined;
+		if (!binEntry) return undefined;
+		const cliPath = path.resolve(path.dirname(packageJsonPath), binEntry);
+		return cliPath;
+	} catch {
+		return undefined;
+	}
+}
+
+function getPiLaunchSpec(env: NodeJS.ProcessEnv = process.env): { command: string; args: string[]; displayCommand: string } {
+	const resolvedCommand = resolveCommandOnPath("pi", env);
+	if (resolvedCommand) return { command: resolvedCommand, args: [], displayCommand: "pi" };
+	const cliScript = resolvePiCliScript();
+	if (cliScript) return { command: process.execPath, args: [cliScript], displayCommand: "pi" };
+	return { command: "pi", args: [], displayCommand: "pi" };
+}
+
 function getSpawnResultReason(result: SpawnSyncReturns<Buffer>): string {
 	return trimOutput(result.stderr?.toString("utf8")) || trimOutput(result.stdout?.toString("utf8")) || result.error?.message || (result.signal ? `pi terminated by signal ${result.signal}` : `pi exited with code ${result.status ?? 1}`);
 }
@@ -257,14 +340,14 @@ async function runPiWithTerminalHandoff(
 	worktreePath: string,
 	onFailure: (reason: string) => string = (reason) => `Automatic pi handoff failed for ${worktreePath}. Fallback: ${buildFallbackPiCommand(worktreePath)}. Reason: ${reason}`,
 ): Promise<WorktreeMetadata["handoff"]> {
-	const command = "pi";
 	const spawn = ctx.spawnInteractive ?? spawnSync;
+	const launch = getPiLaunchSpec(process.env);
 	let spawnResult: SpawnSyncReturns<Buffer> | undefined;
 
 	const exitCode = await ctx.ui!.custom!<number | null>((tui, _theme, _keybindings, done) => {
 		tui.stop?.();
 		process.stdout.write("\x1b[2J\x1b[H");
-		spawnResult = spawn(command, [], {
+		spawnResult = spawn(launch.command, launch.args, {
 			cwd: worktreePath,
 			env: process.env,
 			stdio: "inherit",
@@ -275,10 +358,10 @@ async function runPiWithTerminalHandoff(
 		return { render: () => [], invalidate: () => {} };
 	});
 
-	if (exitCode === 0) return { attempted: true, ok: true, command };
+	if (exitCode === 0) return { attempted: true, ok: true, command: launch.displayCommand };
 	const reason = spawnResult ? getSpawnResultReason(spawnResult) : `pi exited with code ${exitCode ?? 1}`;
 	warn(ctx, onFailure(reason));
-	return { attempted: true, ok: false, reason, command };
+	return { attempted: true, ok: false, reason, command: launch.displayCommand };
 }
 
 async function attemptWorktreeHandoff(ctx: Ctx, worktreePath: string): Promise<WorktreeMetadata["handoff"]> {

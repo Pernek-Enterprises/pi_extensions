@@ -255,9 +255,52 @@ test("Interactive /worktree-start handoff uses a real terminal launch instead of
 	assert.equal(stopCalled, 1);
 	assert.equal(startCalled, 1);
 	assert.equal(renderCalled, 1);
-	const handoffCall = ctx.execCalls.find((call) => call.command === "pi");
+	const handoffCall = ctx.execCalls.find((call) => call.command === "pi" || String(call.command).endsWith("/pi") || String(call.command).endsWith("/node"));
 	assert.ok(handoffCall, "expected interactive handoff to launch pi");
 	assert.equal(handoffCall?.options?.cwd, "/parallel/.worktrees/repo/feature-ui");
+});
+
+test("Interactive /worktree-start handoff falls back to the installed CLI script when pi is not on PATH", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const originalPath = process.env.PATH;
+	process.env.PATH = "";
+	const ctx = createCtx({
+		hasUI: true,
+		ui: {
+			custom: async <T>(renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => {
+				let result!: T;
+				renderer({}, null, null, (value: T) => {
+					result = value;
+				});
+				return result;
+			},
+		},
+		spawnInteractive: (command, args, options) => {
+			ctx.execCalls.push({ command: `${command} ${args.join(" ")}`.trim(), options });
+			return { status: 0, stdout: Buffer.from(""), stderr: Buffer.from(""), signal: null };
+		},
+	});
+
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-ui-pathless")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	try {
+		await startWorktree(ctx, "feature-ui-pathless");
+	} finally {
+		process.env.PATH = originalPath;
+	}
+
+	const handoffCall = ctx.execCalls.find((call) => String(call.command).includes("dist/cli.js"));
+	assert.ok(handoffCall, "expected interactive handoff to fall back to the resolved pi CLI script");
+	assert.equal(handoffCall?.options?.cwd, "/parallel/.worktrees/repo/feature-ui-pathless");
 });
 
 test("Representative /worktree-start validation failures reject before creation and append auditable failure reasons to history", async () => {
