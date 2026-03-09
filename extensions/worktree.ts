@@ -1,5 +1,6 @@
 import path from "node:path";
-import { promises as fs } from "node:fs";
+import { promises as fs, accessSync, constants as fsConstants, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 type ExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
@@ -248,6 +249,62 @@ function buildFallbackPiCommand(worktreePath: string): string {
 	return `cd ${JSON.stringify(worktreePath)} && pi`;
 }
 
+function isExecutableFile(filePath: string): boolean {
+	try {
+		accessSync(filePath, fsConstants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function resolveCommandOnPath(command: string, env: NodeJS.ProcessEnv): string | undefined {
+	const pathValue = env.PATH ?? process.env.PATH ?? "";
+	for (const segment of pathValue.split(path.delimiter).filter(Boolean)) {
+		const candidate = path.join(segment, command);
+		if (isExecutableFile(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+function findPackageJsonPath(packageName: string): string | undefined {
+	const require = createRequire(import.meta.url);
+	for (const root of require.resolve.paths(packageName) ?? []) {
+		const candidate = path.join(root, packageName, "package.json");
+		try {
+			accessSync(candidate, fsConstants.R_OK);
+			return candidate;
+		} catch {
+			// keep searching resolver roots
+		}
+	}
+	return undefined;
+}
+
+function resolvePiCliScript(): string | undefined {
+	const packageJsonPath = findPackageJsonPath("@mariozechner/pi-coding-agent");
+	if (!packageJsonPath) return undefined;
+	try {
+		const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { bin?: string | Record<string, string> };
+		const binEntry = typeof packageJson.bin === "string"
+			? packageJson.bin
+			: packageJson.bin && typeof packageJson.bin.pi === "string"
+				? packageJson.bin.pi
+				: undefined;
+		return binEntry ? path.resolve(path.dirname(packageJsonPath), binEntry) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function getPiLaunchSpec(env: NodeJS.ProcessEnv = process.env): { command: string; args: string[]; displayCommand: string } {
+	const resolvedCommand = resolveCommandOnPath("pi", env);
+	if (resolvedCommand) return { command: resolvedCommand, args: [], displayCommand: "pi" };
+	const cliScript = resolvePiCliScript();
+	if (cliScript) return { command: process.execPath, args: [cliScript], displayCommand: "pi" };
+	return { command: "pi", args: [], displayCommand: "pi" };
+}
+
 function getSpawnResultReason(result: SpawnSyncReturns<Buffer>): string {
 	return trimOutput(result.stderr?.toString("utf8")) || trimOutput(result.stdout?.toString("utf8")) || result.error?.message || (result.signal ? `pi terminated by signal ${result.signal}` : `pi exited with code ${result.status ?? 1}`);
 }
@@ -257,14 +314,14 @@ async function runPiWithTerminalHandoff(
 	worktreePath: string,
 	onFailure: (reason: string) => string = (reason) => `Automatic pi handoff failed for ${worktreePath}. Fallback: ${buildFallbackPiCommand(worktreePath)}. Reason: ${reason}`,
 ): Promise<WorktreeMetadata["handoff"]> {
-	const command = "pi";
 	const spawn = ctx.spawnInteractive ?? spawnSync;
+	const launch = getPiLaunchSpec(process.env);
 	let spawnResult: SpawnSyncReturns<Buffer> | undefined;
 
 	const exitCode = await ctx.ui!.custom!<number | null>((tui, _theme, _keybindings, done) => {
 		tui.stop?.();
 		process.stdout.write("\x1b[2J\x1b[H");
-		spawnResult = spawn(command, [], {
+		spawnResult = spawn(launch.command, launch.args, {
 			cwd: worktreePath,
 			env: process.env,
 			stdio: "inherit",
@@ -275,10 +332,10 @@ async function runPiWithTerminalHandoff(
 		return { render: () => [], invalidate: () => {} };
 	});
 
-	if (exitCode === 0) return { attempted: true, ok: true, command };
+	if (exitCode === 0) return { attempted: true, ok: true, command: launch.displayCommand };
 	const reason = spawnResult ? getSpawnResultReason(spawnResult) : `pi exited with code ${exitCode ?? 1}`;
 	warn(ctx, onFailure(reason));
-	return { attempted: true, ok: false, reason, command };
+	return { attempted: true, ok: false, reason, command: launch.displayCommand };
 }
 
 async function attemptWorktreeHandoff(ctx: Ctx, worktreePath: string): Promise<WorktreeMetadata["handoff"]> {
