@@ -488,6 +488,38 @@ test("/worktree-pr verifies managed-worktree discovery via repository-backed met
 	assert.ok(historyEntries(ctx).some((entry) => entry.type === "worktree-pr" && entry.prUrl === "https://github.com/org/repo/pull/123"));
 });
 
+test("/worktree-pr reads shared metadata from the main checkout when the worktree has no local .pi metadata copy", async () => {
+	const createPr = getCommand(worktreeExtension, "worktree-pr");
+	const ctx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-shared" });
+	seedArtifact(ctx, "/repo/.pi/worktrees/feature-shared.json", {
+		slug: "feature-shared",
+		branch: "worktree/feature-shared",
+		repoRoot: "/repo",
+		mainCheckoutPath: "/repo",
+		worktreePath: "/parallel/.worktrees/repo/feature-shared",
+		createdAt: "2025-01-01T00:00:00.000Z",
+	});
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		assert.equal(options?.cwd, "/parallel/.worktrees/repo/feature-shared");
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/parallel/.worktrees/repo/feature-shared\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "worktree/feature-shared\n", stderr: "", code: 0 };
+		if (command === "git rev-parse --git-common-dir") return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		if (command === "gh auth status") return { stdout: "Logged in to github.com\n", stderr: "", code: 0 };
+		if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
+		if (command === "git push -u origin worktree/feature-shared") return { stdout: "", stderr: "", code: 0 };
+		if (command.startsWith("gh pr view ")) return { stdout: "https://github.com/org/repo/pull/200\n", stderr: "", code: 0 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	await createPr(ctx);
+
+	const sharedMetadata = parseJson<Record<string, unknown>>(ctx.artifacts.get("/repo/.pi/worktrees/feature-shared.json")!);
+	assert.equal(sharedMetadata.prUrl, "https://github.com/org/repo/pull/200");
+	assert.match(String(sharedMetadata.prStatus ?? ""), /existing/i);
+	assert.ok((ctx.artifacts.get("/repo/.pi/worktrees/history.jsonl") ?? "").includes("worktree-pr"));
+});
+
 test("/worktree-pr rejects metadata path mismatches and only succeeds when cwd and branch match recorded managed metadata", async () => {
 	const createPr = getCommand(worktreeExtension, "worktree-pr");
 	const mismatchCtx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-z" });
@@ -595,6 +627,43 @@ test("Existing PR already open for branch causes /worktree-pr to surface the exi
 	const metadata = parseJson<Record<string, unknown>>(ctx.artifacts.get(".pi/worktrees/feature-k.json")!);
 	assert.equal(metadata.prUrl, "https://github.com/org/repo/pull/126");
 	assert.match(String(metadata.prStatus ?? ""), /existing/i);
+});
+
+test("/worktree-cleanup reads shared metadata from the main checkout when the worktree has no local .pi metadata copy", async () => {
+	const cleanupWorktree = getCommand(worktreeExtension, "worktree-cleanup");
+	const ctx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-clean-shared" });
+	seedArtifact(ctx, "/repo/.pi/worktrees/feature-clean-shared.json", {
+		slug: "feature-clean-shared",
+		branch: "worktree/feature-clean-shared",
+		repoRoot: "/repo",
+		mainCheckoutPath: "/repo",
+		worktreePath: "/parallel/.worktrees/repo/feature-clean-shared",
+		createdAt: "2025-01-01T00:00:00.000Z",
+	});
+	let removed = false;
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (options?.cwd === "/parallel/.worktrees/repo/feature-clean-shared") {
+			if (removed) throw new Error(`cwd missing after removal: ${command}`);
+			if (command === "git rev-parse --show-toplevel") return { stdout: "/parallel/.worktrees/repo/feature-clean-shared\n", stderr: "", code: 0 };
+			if (command === "git branch --show-current") return { stdout: "worktree/feature-clean-shared\n", stderr: "", code: 0 };
+			if (command === "git rev-parse --git-common-dir") return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+			if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
+			if (command === "git status -sb") return { stdout: "## worktree/feature-clean-shared...origin/worktree/feature-clean-shared\n", stderr: "", code: 0 };
+			if (command.startsWith("git worktree remove ")) {
+				removed = true;
+				return { stdout: "", stderr: "", code: 0 };
+			}
+		}
+		if (command === "pi" && options?.cwd === "/repo") return { stdout: "", stderr: "return handoff unavailable", code: 1 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	await cleanupWorktree(ctx);
+
+	const sharedMetadata = parseJson<Record<string, unknown>>(ctx.artifacts.get("/repo/.pi/worktrees/feature-clean-shared.json")!);
+	assert.match(String(sharedMetadata.cleanupResult ?? ""), /removed/i);
+	assert.ok((ctx.artifacts.get("/repo/.pi/worktrees/history.jsonl") ?? "").includes("worktree-cleanup"));
 });
 
 test("/worktree-cleanup rejects dirty/unpushed or unmanaged checkouts and records auditable failure reasons", async () => {

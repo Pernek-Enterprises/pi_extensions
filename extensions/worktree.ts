@@ -117,6 +117,10 @@ function getHistoryPath(): string {
 	return `.pi/worktrees/history.jsonl`;
 }
 
+function resolveArtifactPath(root: string, artifactPath: string): string {
+	return path.isAbsolute(artifactPath) ? artifactPath : path.join(root, artifactPath);
+}
+
 function getWorktreeRoot(repoRoot: string): string {
 	const configuredRoot = trimOutput(process.env.PI_WORKTREE_ROOT);
 	if (configuredRoot) return configuredRoot;
@@ -149,8 +153,28 @@ async function readJsonArtifact<T>(ctx: Ctx, artifactPath: string): Promise<T | 
 	}
 }
 
-async function readMetadata(ctx: Ctx, slug: string): Promise<WorktreeMetadata | undefined> {
-	return await readJsonArtifact<WorktreeMetadata>(ctx, getMetadataPath(slug));
+async function detectSharedCheckoutRoot(ctx: Ctx, cwd: string): Promise<string> {
+	try {
+		const result = await run(ctx, "git rev-parse --git-common-dir", { cwd });
+		const commonDir = trimOutput(result.stdout);
+		if (commonDir) {
+			const absoluteCommonDir = path.resolve(cwd, commonDir);
+			if (path.basename(absoluteCommonDir) === ".git") return path.dirname(absoluteCommonDir);
+		}
+	} catch {
+		// Fall back to the current repository root when git-common-dir is unavailable.
+	}
+	return await detectRepoRoot(ctx, cwd);
+}
+
+async function readMetadata(ctx: Ctx, slug: string, cwd = ctx.cwd): Promise<WorktreeMetadata | undefined> {
+	const legacyPath = getMetadataPath(slug);
+	const legacyMetadata = await readJsonArtifact<WorktreeMetadata>(ctx, legacyPath);
+	if (legacyMetadata) return legacyMetadata;
+	const sharedRoot = await detectSharedCheckoutRoot(ctx, cwd);
+	const sharedPath = resolveArtifactPath(sharedRoot, legacyPath);
+	if (sharedPath === legacyPath) return undefined;
+	return await readJsonArtifact<WorktreeMetadata>(ctx, sharedPath);
 }
 
 async function writeArtifact(ctx: Ctx, artifactPath: string, content: string, append = false): Promise<void> {
@@ -178,12 +202,28 @@ async function writeArtifact(ctx: Ctx, artifactPath: string, content: string, ap
 	else await fs.writeFile(artifactPath, content, "utf8");
 }
 
-async function persistMetadata(ctx: Ctx, metadata: WorktreeMetadata): Promise<void> {
-	await writeArtifact(ctx, getMetadataPath(metadata.slug), `${JSON.stringify(metadata, null, 2)}\n`, false);
+async function persistManagedArtifact(
+	ctx: Ctx,
+	cwd: string,
+	artifactPath: string,
+	content: string,
+	append = false,
+	sharedRootOverride?: string,
+): Promise<void> {
+	await writeArtifact(ctx, artifactPath, content, append);
+	const sharedRoot = sharedRootOverride ?? await detectSharedCheckoutRoot(ctx, cwd);
+	const sharedPath = resolveArtifactPath(sharedRoot, artifactPath);
+	if (sharedPath !== artifactPath) {
+		await writeArtifact(ctx, sharedPath, content, append);
+	}
 }
 
-async function appendHistory(ctx: Ctx, event: Record<string, unknown>): Promise<void> {
-	await writeArtifact(ctx, getHistoryPath(), `${JSON.stringify(event)}\n`, true);
+async function persistMetadata(ctx: Ctx, metadata: WorktreeMetadata, cwd = ctx.cwd, sharedRootOverride?: string): Promise<void> {
+	await persistManagedArtifact(ctx, cwd, getMetadataPath(metadata.slug), `${JSON.stringify(metadata, null, 2)}\n`, false, sharedRootOverride);
+}
+
+async function appendHistory(ctx: Ctx, event: Record<string, unknown>, cwd = ctx.cwd, sharedRootOverride?: string): Promise<void> {
+	await persistManagedArtifact(ctx, cwd, getHistoryPath(), `${JSON.stringify(event)}\n`, true, sharedRootOverride);
 }
 
 async function recordFailure(
@@ -191,6 +231,8 @@ async function recordFailure(
 	failure: Omit<WorktreeFailure, "at">,
 	metadata?: WorktreeMetadata,
 	extra?: Record<string, unknown>,
+	cwd = ctx.cwd,
+	sharedRootOverride?: string,
 ): Promise<void> {
 	const at = new Date().toISOString();
 	const persistedFailure: WorktreeFailure = { ...failure, at };
@@ -198,7 +240,7 @@ async function recordFailure(
 		await persistMetadata(ctx, {
 			...metadata,
 			lastFailure: persistedFailure,
-		});
+		}, cwd, sharedRootOverride);
 	}
 	await appendHistory(ctx, {
 		type: `${failure.command}-failed`,
@@ -214,7 +256,7 @@ async function recordFailure(
 				worktreePath: metadata.worktreePath,
 			}
 			: {}),
-	});
+	}, cwd, sharedRootOverride);
 }
 
 async function detectRepoRoot(ctx: Ctx, cwd?: string): Promise<string> {
@@ -601,9 +643,13 @@ async function handleWorktreeCleanup(ctx: Ctx): Promise<WorktreeMetadata> {
 	const cwd = ctx.cwd;
 	let phase = "validate";
 	let metadata: WorktreeMetadata | undefined;
+	let persistenceCwd = cwd;
+	let persistenceSharedRoot: string | undefined;
 
 	try {
 		({ metadata } = await detectManagedWorktreeFromCwd(ctx, cwd));
+		persistenceCwd = metadata.mainCheckoutPath ?? metadata.repoRoot ?? cwd;
+		persistenceSharedRoot = metadata.mainCheckoutPath ?? metadata.repoRoot;
 		await ensureSafeToCleanup(ctx, cwd);
 
 		phase = "cleanup";
@@ -617,7 +663,7 @@ async function handleWorktreeCleanup(ctx: Ctx): Promise<WorktreeMetadata> {
 			returnTarget: metadata.mainCheckoutPath ?? metadata.repoRoot,
 			cleanupAt: new Date().toISOString(),
 		};
-		await persistMetadata(ctx, nextMetadata);
+		await persistMetadata(ctx, nextMetadata, persistenceCwd, persistenceSharedRoot);
 		await appendHistory(ctx, {
 			type: "worktree-cleanup",
 			slug: metadata.slug,
@@ -625,13 +671,13 @@ async function handleWorktreeCleanup(ctx: Ctx): Promise<WorktreeMetadata> {
 			worktreePath: metadata.worktreePath,
 			cleanupResult: nextMetadata.cleanupResult,
 			cleanupAt: nextMetadata.cleanupAt,
-		});
+		}, persistenceCwd, persistenceSharedRoot);
 		info(ctx, `Cleanup completed for ${metadata.slug}.`);
 		await attemptReturnToMain(ctx, nextMetadata.returnTarget ?? metadata.repoRoot ?? "/");
 		return nextMetadata;
 	} catch (error) {
 		const reason = (error as Error).message || "Unknown worktree-cleanup failure";
-		await recordFailure(ctx, { command: "worktree-cleanup", phase, reason }, metadata, { cwd });
+		await recordFailure(ctx, { command: "worktree-cleanup", phase, reason }, metadata, { cwd }, persistenceCwd, persistenceSharedRoot);
 		throw error;
 	}
 }
