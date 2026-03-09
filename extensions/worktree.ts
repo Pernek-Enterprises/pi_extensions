@@ -117,8 +117,16 @@ function getHistoryPath(): string {
 	return `.pi/worktrees/history.jsonl`;
 }
 
+function getWorktreeRoot(repoRoot: string): string {
+	const configuredRoot = trimOutput(process.env.PI_WORKTREE_ROOT);
+	if (configuredRoot) return configuredRoot;
+	const homeDir = trimOutput(process.env.HOME);
+	if (homeDir) return path.join(homeDir, "parallel", ".worktrees");
+	return path.join(path.dirname(repoRoot), ".worktrees");
+}
+
 function getWorktreePath(repoRoot: string, slug: string): string {
-	return path.join("/parallel/.worktrees", getRepoSlug(repoRoot), slug);
+	return path.join(getWorktreeRoot(repoRoot), getRepoSlug(repoRoot), slug);
 }
 
 async function readArtifact(ctx: Ctx, artifactPath: string): Promise<string | undefined> {
@@ -374,7 +382,10 @@ async function handleWorktreeStart(ctx: Ctx, rawSlug?: string): Promise<Worktree
 
 		phase = "create";
 		info(ctx, `Creating managed worktree ${branch} at ${worktreePath}...`);
-		await run(ctx, `git worktree add ${JSON.stringify(worktreePath)} -b ${branch} main`, { cwd: repoRoot });
+		const createResult = await run(ctx, `git worktree add ${JSON.stringify(worktreePath)} -b ${branch} main`, { cwd: repoRoot });
+		if (createResult.code !== 0) {
+			fail(ctx, trimOutput(createResult.stderr) || trimOutput(createResult.stdout) || `git worktree add failed with code ${createResult.code}`);
+		}
 
 		phase = "handoff";
 		info(ctx, `Attempting pi handoff into ${worktreePath}...`);
