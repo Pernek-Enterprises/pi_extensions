@@ -1,6 +1,8 @@
 // Generated from a markdown plan.
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { promises as fs } from "node:fs";
 
 import worktreeExtension from "../../extensions/worktree.ts";
 
@@ -42,6 +44,18 @@ process.env.PI_WORKTREE_ROOT = TEST_WORKTREE_ROOT;
 
 function worktreePath(slug: string): string {
 	return `${TEST_WORKTREE_ROOT}/repo/${slug}`;
+}
+
+function projectDirPath(): string {
+	return path.join(TEST_WORKTREE_ROOT, "repo");
+}
+
+function projectEnvrcPath(): string {
+	return path.join(projectDirPath(), ".envrc");
+}
+
+async function resetProjectDir() {
+	await fs.rm(projectDirPath(), { recursive: true, force: true });
 }
 
 function createCtx(overrides: Partial<Ctx> = {}): Ctx {
@@ -166,6 +180,7 @@ test("/worktree-start creates a managed worktree from main using git worktree, p
 		if (command.includes("show-ref") && command.includes("worktree/feature-a")) return { stdout: "", stderr: "", code: 1 };
 		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
 		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === `direnv allow ${JSON.stringify(projectDirPath())}`) return { stdout: "", stderr: "", code: 0 };
 		if (command === "pi") return { stdout: "", stderr: "", code: 0 };
 		throw new Error(`Unexpected exec: ${command}`);
 	};
@@ -197,6 +212,67 @@ test("/worktree-start creates a managed worktree from main using git worktree, p
 	assert.ok(infoMessages.some((message) => /handoff/i.test(message)));
 });
 
+test("/worktree-start creates a project-level .envrc once and runs direnv allow for new worktree projects", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const ctx = createCtx();
+	await resetProjectDir();
+	let direnvAllowCalls = 0;
+
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-envrc")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === `direnv allow ${JSON.stringify(projectDirPath())}`) {
+			direnvAllowCalls += 1;
+			assert.equal(options?.cwd, projectDirPath());
+			return { stdout: "", stderr: "", code: 0 };
+		}
+		if (command === "pi") return { stdout: "", stderr: "", code: 0 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	try {
+		await startWorktree(ctx, "feature-envrc");
+		const envrc = await fs.readFile(projectEnvrcPath(), "utf8");
+		assert.equal(envrc, '_GH_DETECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"\nsource_env ../.gh-detect.sh\n');
+		assert.equal(direnvAllowCalls, 1);
+	} finally {
+		await resetProjectDir();
+	}
+});
+
+test("/worktree-start does not overwrite an existing project-level .envrc or rerun direnv allow", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const ctx = createCtx();
+	await resetProjectDir();
+	await fs.mkdir(projectDirPath(), { recursive: true });
+	await fs.writeFile(projectEnvrcPath(), "existing\n", "utf8");
+
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-envrc-existing")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command.startsWith("direnv allow ")) throw new Error("direnv allow should not run when .envrc already exists");
+		if (command === "pi") return { stdout: "", stderr: "", code: 0 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	try {
+		await startWorktree(ctx, "feature-envrc-existing");
+		assert.equal(await fs.readFile(projectEnvrcPath(), "utf8"), "existing\n");
+	} finally {
+		await resetProjectDir();
+	}
+});
+
 test("/worktree-start persists managed metadata before attempting pi handoff so follow-up commands can discover the new checkout immediately", async () => {
 	const startWorktree = getCommand(worktreeExtension, "worktree-start");
 	const ctx = createCtx();
@@ -211,6 +287,7 @@ test("/worktree-start persists managed metadata before attempting pi handoff so 
 		if (command.includes("show-ref") && command.includes("worktree/feature-before-handoff")) return { stdout: "", stderr: "", code: 1 };
 		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
 		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === `direnv allow ${JSON.stringify(projectDirPath())}`) return { stdout: "", stderr: "", code: 0 };
 		if (command === "pi") {
 			const metadata = ctx.artifacts.get(".pi/worktrees/feature-before-handoff.json");
 			const history = ctx.artifacts.get(".pi/worktrees/history.jsonl") ?? "";
@@ -873,6 +950,9 @@ test("/worktree-cleanup rejects running inside a worktree, dirty targets, and mi
 		throw new Error(`Unexpected exec: ${command}`);
 	};
 	await assert.rejects(() => Promise.resolve(cleanupWorktree(dirtyCtx, "feature-dirty")), /dirty|uncommitted/i);
+	const dirtyMetadata = parseJson<Record<string, unknown>>(dirtyCtx.artifacts.get(".pi/worktrees/feature-dirty.json")!);
+	assert.match(String((dirtyMetadata.lastFailure as Record<string, unknown>)?.reason ?? ""), /dirty|uncommitted/i);
+	assert.equal((dirtyMetadata.lastFailure as Record<string, unknown>)?.phase, "verify");
 	assert.ok(historyEntries(dirtyCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /dirty|uncommitted/i.test(String(entry.reason))));
 });
 

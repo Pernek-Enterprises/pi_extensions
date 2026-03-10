@@ -133,6 +133,10 @@ function getWorktreePath(repoRoot: string, slug: string): string {
 	return path.join(getWorktreeRoot(repoRoot), getRepoSlug(repoRoot), slug);
 }
 
+function getProjectWorktreePath(repoRoot: string): string {
+	return path.join(getWorktreeRoot(repoRoot), getRepoSlug(repoRoot));
+}
+
 async function readArtifact(ctx: Ctx, artifactPath: string): Promise<string | undefined> {
 	if (ctx.artifacts?.has(artifactPath)) return ctx.artifacts.get(artifactPath);
 	if (ctx.readArtifact) return await ctx.readArtifact(artifactPath);
@@ -292,6 +296,27 @@ async function ensureTargetPathAvailable(ctx: Ctx, worktreePath: string, cwd?: s
 	const result = await run(ctx, "git worktree list --porcelain", cwd ? { cwd } : undefined);
 	if (porcelainWorktreeExistsAt(result.stdout, worktreePath)) {
 		fail(ctx, `Target worktree path already exists and appears unmanaged: ${worktreePath}`);
+	}
+}
+
+async function ensureProjectDirenv(ctx: Ctx, repoRoot: string): Promise<void> {
+	const projectDir = getProjectWorktreePath(repoRoot);
+	const envrcPath = path.join(projectDir, ".envrc");
+	const envrcContent = [
+		'_GH_DETECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"',
+		"source_env ../.gh-detect.sh",
+		"",
+	].join("\n");
+	try {
+		await fs.access(envrcPath, fsConstants.F_OK);
+		return;
+	} catch {
+		await fs.mkdir(projectDir, { recursive: true });
+		await fs.writeFile(envrcPath, envrcContent, "utf8");
+		const allowResult = await run(ctx, `direnv allow ${shQuote(projectDir)}`, { cwd: projectDir });
+		if (allowResult.code !== 0) {
+			fail(ctx, trimOutput(allowResult.stderr) || trimOutput(allowResult.stdout) || `direnv allow failed with code ${allowResult.code}`);
+		}
 	}
 }
 
@@ -525,6 +550,8 @@ async function handleWorktreeStart(ctx: Ctx, rawSlug?: string): Promise<Worktree
 		if (createResult.code !== 0) {
 			fail(ctx, trimOutput(createResult.stderr) || trimOutput(createResult.stdout) || `git worktree add failed with code ${createResult.code}`);
 		}
+
+		await ensureProjectDirenv(ctx, repoRoot);
 
 		const createdAt = new Date().toISOString();
 		const metadata: WorktreeMetadata = {
