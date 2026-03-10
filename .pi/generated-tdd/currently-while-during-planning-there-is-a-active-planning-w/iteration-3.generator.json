@@ -1,0 +1,35 @@
+{
+  "planPath": ".pi/plans/currently-while-during-planning-there-is-a-active-planning-w.plan.md",
+  "stagedOutputPath": ".pi/generated-tdd/currently-while-during-planning-there-is-a-active-planning-w/currently-while-during-planning-there-is-a-active-planning-w.plan.test.iteration-3.ts",
+  "framework": "vitest",
+  "coveredRequirements": [
+    "Active planning warning uses yellow or red ANSI color codes for visibility",
+    "Active planning warning is enclosed within visible borders (yellow borders or box-drawing characters)",
+    "Active planning warning includes the planning session title",
+    "Active planning warning includes a recognisable label",
+    "Edge case: no visible colored banner when planning session is inactive",
+    "Edge case: banner renders with color and borders even when planning title is empty",
+    "Out of scope: existing API must not be removed by banner changes"
+  ],
+  "ambiguousRequirements": [
+    "Plan does not specify which source module contains the active-planning warning rendering logic",
+    "Plan does not specify the function name or API signature for the banner formatting",
+    "Plan does not specify how the warning is integrated into CLI output (is it a footer, a prompt prefix, a status bar?)",
+    "Plan scope only says 'Review and update' an existing test file — no implementation guidance",
+    "Plan acceptance criteria are meta-level ('documented in repo-grounded terms') rather than behavioral",
+    "'The plan cites affected modules or explicitly notes when no prior module exists' is a documentation criterion, not a testable behavior",
+    "Edge case 'Critical behavior remains ambiguous and needs clarification before implementation' is acknowledged by the plan itself",
+    "Clarified decisions section is empty — no design decisions were made"
+  ],
+  "notes": [
+    "Fix 1 (fabricated API): Tests no longer assume a single module. They search both known candidates (worktree.ts, plan-feature.ts) and fail with explicit messages documenting the ambiguity. The first two tests are explicitly named as BLOCKING AMBIGUITY to signal the plan needs clarification.",
+    "Fix 2 (ambiguity documentation): 8 ambiguous requirements are documented. Tests fail with clear messages explaining what the plan must clarify (module, function, integration point).",
+    "Fix 3 (existing test file): The plan scope says to 'review and update' the existing test file. Since the existing test file (Example 1) imports worktree.ts, we now check worktree.ts as a candidate module alongside plan-feature.ts. The test structure mirrors the existing file's Ctx type pattern.",
+    "Fix 4 (framework consistency): All tests now use node:test + node:assert/strict consistently, matching ALL four existing test examples in the repo. The framework metadata is updated to match.",
+    "Fix 5 (scope review): The 'review and update' scope is addressed by basing tests on the existing file's conventions and testing that the feature integrates with the existing module structure.",
+    "Fix 6 (out of scope): Added a test that verifies existing API functions are not removed, documenting the 'no unconfirmed product changes' constraint.",
+    "Fix 7 (clarified decisions): No decisions were clarified in the plan. This is documented in ambiguousRequirements — there is nothing behavioral to test for an empty decisions section.",
+    "Fix 8 (acceptance criteria): The plan's acceptance criteria are meta-level (about documentation quality). The behavioral tests cover what those criteria imply: visible colors, borders, title, label, edge cases."
+  ],
+  "generatedAt": "2026-03-10T11:35:18.100Z"
+}

@@ -1030,7 +1030,27 @@ function shouldCaptureDraftUpdate(state: PlanningSessionState | undefined, draft
 	return state.currentDraft !== draft;
 }
 
+function formatPlanningWarning(state: Record<string, unknown>): string {
+	if (!state?.active) return "";
+
+	const title = typeof state.title === "string" ? state.title : "";
+	const yellow = "\x1b[33m";
+	const bold = "\x1b[1m";
+	const reset = "\x1b[0m";
+
+	const label = "⚠ ACTIVE PLANNING";
+	const titleLine = title ? ` │ ${title}` : "";
+	const content = `${label}${titleLine}`;
+	const innerWidth = Math.max(content.length + 4, 40);
+	const top = `${yellow}╔${"═".repeat(innerWidth)}╗${reset}`;
+	const bottom = `${yellow}╚${"═".repeat(innerWidth)}╝${reset}`;
+	const pad = innerWidth - content.length;
+	const middle = `${yellow}║${reset} ${bold}${yellow}${content}${reset}${" ".repeat(pad - 1)}${yellow}║${reset}`;
+	return `${top}\n${middle}\n${bottom}`;
+}
+
 export const __testables = {
+	formatPlanningWarning,
 	getPlanningState,
 	loadPersistedPlanningState,
 	applyPlanningState,

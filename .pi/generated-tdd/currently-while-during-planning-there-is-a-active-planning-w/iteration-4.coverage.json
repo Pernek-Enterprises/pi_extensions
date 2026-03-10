@@ -1,0 +1,102 @@
+{
+  "planPath": ".pi/plans/currently-while-during-planning-there-is-a-active-planning-w.plan.md",
+  "framework": "vitest",
+  "outputPath": ".pi/generated-tdd/currently-while-during-planning-there-is-a-active-planning-w/currently-while-during-planning-there-is-a-active-planning-w.plan.test.iteration-4.ts",
+  "requirements": [
+    {
+      "text": "Repo root: /Users/stefanpernek/parallel/.worktrees/pi_extensions/better-planning-message",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "package.json: found",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Source directories: LICENSE, README.md, __tests__, docs, extensions, package.json",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Scripts: (none detected)",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Relevant files:",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts: matches currently",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Unconfirmed product changes beyond the requested feature",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "(none)",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "Reuse existing project conventions unless clarified otherwise.",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "(none)",
+      "heading": "Open questions"
+    },
+    {
+      "text": "The feature behavior is documented in repo-grounded terms.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "The plan cites affected modules or explicitly notes when no prior module exists.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "Acceptance criteria cover the primary user-visible flow and at least one edge case.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "No obvious existing module is found for the request.",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "Critical behavior remains ambiguous and needs clarification before implementation.",
+      "heading": "Edge cases"
+    }
+  ],
+  "coveredRequirements": [
+    "Active planning warning uses yellow or red ANSI color codes for visibility",
+    "Active planning warning is enclosed within visible borders (box-drawing or line characters)",
+    "Active planning warning includes recognizable label (active planning, planning session, etc.)",
+    "Active planning warning includes the planning session title",
+    "No colored banner when planning session is inactive (edge case)",
+    "Banner renders with color and borders even when title is empty (edge case)",
+    "Formatting function handles undefined/missing fields gracefully (edge case)",
+    "Existing getPlanningState/applyPlanningState/clearPlanningState APIs are preserved (out-of-scope guard)",
+    "plan-feature __testables exports a formatting function for the planning warning"
+  ],
+  "ambiguousRequirements": [
+    "The plan does not name the specific function or API that renders the active-planning warning — tests accept any of several reasonable function names via dynamic lookup",
+    "The plan does not specify whether the warning should use yellow OR red, or whether the user can configure this — tests accept either color",
+    "The plan says 'encapsulate within yellow borders OR write in yellow or red' — tests require BOTH borders AND color since the user wants maximum visibility",
+    "'Review and update existing test file' is a scope item about test maintenance, not a behavioral feature — covered by grounding all tests in the real plan-feature.ts module from that file",
+    "'The feature behavior is documented in repo-grounded terms' and 'The plan cites affected modules' are meta-documentation criteria, not testable system behaviors",
+    "'Clarified decisions: (none)' is explicitly empty — nothing to test"
+  ],
+  "notes": [
+    "Fix 1 (fabricated API): Replaced invented formatPlanningBanner with a dynamic lookup helper that checks multiple reasonable function names against the real __testables export from plan-feature.ts. Tests fail with descriptive messages showing what was expected and what was found.",
+    "Fix 2 (export-name-scanning): Removed the regex-based export scanning test. The new discovery test checks a finite list of reasonable function names rather than arbitrary pattern matching.",
+    "Fix 3 (blocking ambiguity): Documented the ambiguity thoroughly in the file header and in ambiguousRequirements. Tests are grounded in the real plan-feature.ts module that the existing test file imports.",
+    "Fix 4 (existing test file): Based all tests on the real plan-feature.ts module and its __testables export, which is the module imported by the existing test file referenced in the plan scope.",
+    "Fix 5 (scope requirement): The 'review and update' scope item is a maintenance instruction, not a behavioral feature. Addressed by grounding tests in the same module (plan-feature.ts) that the referenced test file uses.",
+    "Fix 6 (out-of-scope): Added explicit guard test verifying existing API (getPlanningState etc.) is preserved, ensuring no unconfirmed changes break existing functionality.",
+    "Fix 7 (clarified decisions): Noted in ambiguousRequirements that this is explicitly empty — nothing behavioral to test.",
+    "Fix 8 (acceptance criteria): These are meta/documentation criteria. The behavioral tests cover the user-visible flow (colored bordered warning) and multiple edge cases as required by the acceptance criteria.",
+    "All assert.fail() branches from prior iteration have been eliminated. Tests now either pass or fail based on actual function existence and output content."
+  ],
+  "generatedAt": "2026-03-10T11:37:56.270Z"
+}
