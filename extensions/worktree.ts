@@ -607,6 +607,60 @@ async function detectManagedWorktreeFromCwd(ctx: Ctx, cwd: string): Promise<{ me
 	return { metadata, repoRoot, branch };
 }
 
+function parseDiffFiles(diff: string): string[] {
+	const files: string[] = [];
+	const regex = /^diff --git a\/.+? b\/(.+)$/gm;
+	let m;
+	while ((m = regex.exec(diff)) !== null) {
+		files.push(m[1]);
+	}
+	return [...new Set(files)];
+}
+
+function parseDiffHunkSummaries(diff: string): Map<string, string[]> {
+	const summaries = new Map<string, string[]>();
+	const fileSections = diff.split(/^diff --git /m).filter(Boolean);
+	for (const section of fileSections) {
+		const fileMatch = section.match(/a\/.+? b\/(.+)/);
+		if (!fileMatch) continue;
+		const file = fileMatch[1];
+		const additions: string[] = [];
+		for (const line of section.split("\n")) {
+			if (line.startsWith("+") && !line.startsWith("+++") && !line.startsWith("+++ ")) {
+				const content = line.slice(1).trim();
+				if (content) additions.push(content);
+			}
+		}
+		if (additions.length > 0) {
+			summaries.set(file, additions.slice(0, 5)); // Keep top 5 additions per file
+		}
+	}
+	return summaries;
+}
+
+function buildDiffBasedPrBody(diff: string, branch: string, slug: string): string {
+	const files = parseDiffFiles(diff);
+	if (files.length === 0) {
+		return `No file changes detected in branch \`${branch}\`.\n\nThis PR was created from managed worktree \`${slug}\`.`;
+	}
+
+	const hunkSummaries = parseDiffHunkSummaries(diff);
+	const sections: string[] = [];
+
+	sections.push(`## Summary\n\nChanges in branch \`${branch}\` affecting ${files.length} file(s).`);
+
+	const fileEntries = files.map((f) => {
+		const additions = hunkSummaries.get(f);
+		if (additions && additions.length > 0) {
+			return `- \`${f}\`\n  - ${additions.slice(0, 3).map((a) => a.substring(0, 100)).join("\n  - ")}`;
+		}
+		return `- \`${f}\``;
+	});
+	sections.push(`## Changed Files\n\n${fileEntries.join("\n")}`);
+
+	return sections.join("\n\n");
+}
+
 function parseGeneratedTexts(response: string | undefined, slug: string): { commitMessage: string; prTitle: string; prBody: string } {
 	const fallback = {
 		commitMessage: `worktree(${slug}): update`,
@@ -648,16 +702,41 @@ async function lookupExistingPr(ctx: Ctx, cwd: string, branch: string): Promise<
 	return undefined;
 }
 
-async function getGeneratedTexts(ctx: Ctx, metadata: WorktreeMetadata, branch: string, diffStat: string, diffPreview: string) {
-	const prompt = [
-		`You are preparing commit and PR text for managed worktree ${metadata.slug}.`,
-		"Return exactly three sections separated by blank lines: commit message, PR title, PR body.",
-		`Branch: ${branch}`,
-		`Worktree path: ${metadata.worktreePath}`,
-		diffStat ? `Diff stat:\n${diffStat}` : "Working tree is clean.",
-		diffPreview ? `Diff preview:\n${diffPreview}` : "",
-	].filter(Boolean).join("\n\n");
-	return parseGeneratedTexts(await ctx.pi?.ask?.(prompt), metadata.slug);
+async function getGeneratedTexts(ctx: Ctx, metadata: WorktreeMetadata, branch: string, fullDiff: string) {
+	// Build a programmatic diff-based PR body as a solid baseline
+	const diffBasedBody = buildDiffBasedPrBody(fullDiff, branch, metadata.slug);
+
+	// Try AI-enhanced description if available
+	if (ctx.pi?.ask) {
+		const prompt = [
+			`You are preparing commit and PR text for managed worktree ${metadata.slug}.`,
+			"Return exactly three sections separated by blank lines: commit message, PR title, PR body (in markdown).",
+			"The PR body MUST reference every changed file by name.",
+			`Branch: ${branch}`,
+			`Worktree path: ${metadata.worktreePath}`,
+			fullDiff ? `Full diff:\n${fullDiff}` : "Working tree is clean.",
+		].filter(Boolean).join("\n\n");
+		const aiResult = parseGeneratedTexts(await ctx.pi.ask(prompt), metadata.slug);
+		// Validate AI result references files from the diff, otherwise use programmatic body
+		const files = parseDiffFiles(fullDiff);
+		const aiBodyReferencesFiles = files.length === 0 || files.some((f) => aiResult.prBody.includes(f));
+		if (aiBodyReferencesFiles && aiResult.prBody.length >= 50) {
+			return aiResult;
+		}
+		// AI result wasn't good enough, use programmatic body but keep AI commit message and title
+		return {
+			commitMessage: aiResult.commitMessage,
+			prTitle: aiResult.prTitle,
+			prBody: diffBasedBody,
+		};
+	}
+
+	// No AI available, use fully programmatic result
+	return {
+		commitMessage: `worktree(${metadata.slug}): update`,
+		prTitle: `worktree/${metadata.slug}: update`,
+		prBody: diffBasedBody,
+	};
 }
 
 async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
@@ -670,20 +749,15 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
 		({ metadata, branch } = await detectManagedWorktreeFromCwd(ctx, cwd));
 		await ensureGhAuthenticated(ctx, cwd);
 
+		// Get full diff against main for comprehensive PR description
+		const fullDiffResult = await runInCwd(ctx, cwd, "git diff main");
+		const fullDiff = trimOutput(fullDiffResult.stdout);
+
 		const status = await runInCwd(ctx, cwd, "git status --short");
 		const hasChanges = trimOutput(status.stdout).length > 0;
-		let diffStat = "";
-		let diffPreview = "";
-		if (hasChanges) {
-			diffStat = trimOutput((await runInCwd(ctx, cwd, "git diff --stat")).stdout);
-			const firstChangedPath = trimOutput(status.stdout).split(/\r?\n/)[0]?.trim().replace(/^[A-Z? ]+/, "").trim();
-			if (firstChangedPath) {
-				diffPreview = trimOutput((await runInCwd(ctx, cwd, `git diff -- ${firstChangedPath}`)).stdout);
-			}
-		}
 
 		phase = "commit";
-		const generatedTexts = await getGeneratedTexts(ctx, metadata, branch, diffStat, diffPreview);
+		const generatedTexts = await getGeneratedTexts(ctx, metadata, branch, fullDiff);
 
 		let commitStatus = "skipped-clean";
 		if (hasChanges) {
@@ -882,4 +956,13 @@ function worktreeExtension(pi?: PiApi) {
 	}
 }
 
-export default worktreeExtension;
+const extensionExport = Object.assign(worktreeExtension, {
+	commands: {
+		"worktree-start": async (ctx: Ctx, slug?: string) => handleWorktreeStart(ctx, slug),
+		"worktree-pr": async (ctx: Ctx) => handleWorktreePr(ctx),
+		"worktree-main": async (ctx: Ctx) => handleWorktreeMain(ctx),
+		"worktree-cleanup": async (ctx: Ctx, slug?: string) => handleWorktreeCleanup(ctx, slug),
+	},
+});
+
+export default extensionExport;

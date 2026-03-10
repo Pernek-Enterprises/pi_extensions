@@ -683,9 +683,8 @@ test("/worktree-pr verifies managed-worktree discovery via repository-backed met
 		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
 		if (command === "git branch --show-current") return { stdout: "worktree/feature-f\n", stderr: "", code: 0 };
 		if (command === "gh auth status") return { stdout: "Logged in to github.com\n", stderr: "", code: 0 };
+		if (command === "git diff main") return { stdout: "diff --git a/src/file.ts b/src/file.ts\n--- a/src/file.ts\n+++ b/src/file.ts\n@@ -1,3 +1,5 @@\n+// change\n", stderr: "", code: 0 };
 		if (command === "git status --short") return { stdout: "M src/file.ts\n", stderr: "", code: 0 };
-		if (command === "git diff --stat") return { stdout: " src/file.ts | 1 +\n", stderr: "", code: 0 };
-		if (command.startsWith("git diff -- ")) return { stdout: "diff --git a/src/file.ts b/src/file.ts\n", stderr: "", code: 0 };
 		if (command.startsWith("gh pr view ")) return { stdout: "", stderr: "not found", code: 1 };
 		if (command.startsWith("git add ")) return { stdout: "", stderr: "", code: 0 };
 		if (command.startsWith("git commit -m ")) return { stdout: "[worktree/feature-f abc123] Generated commit message\n", stderr: "", code: 0 };
@@ -727,6 +726,7 @@ test("/worktree-pr reads shared metadata from the main checkout when the worktre
 		if (command === "git branch --show-current") return { stdout: "worktree/feature-shared\n", stderr: "", code: 0 };
 		if (command === "git rev-parse --git-common-dir") return { stdout: "/repo/.git\n", stderr: "", code: 0 };
 		if (command === "gh auth status") return { stdout: "Logged in to github.com\n", stderr: "", code: 0 };
+		if (command === "git diff main") return { stdout: "", stderr: "", code: 0 };
 		if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
 		if (command === "git push -u origin worktree/feature-shared") return { stdout: "", stderr: "", code: 0 };
 		if (command.startsWith("gh pr view ")) return { stdout: "https://github.com/org/repo/pull/200\n", stderr: "", code: 0 };
@@ -779,9 +779,8 @@ test("If generated text is empty, /worktree-pr falls back to deterministic commi
 		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
 		if (command === "git branch --show-current") return { stdout: "worktree/feature-j\n", stderr: "", code: 0 };
 		if (command === "gh auth status") return { stdout: "Logged in to github.com\n", stderr: "", code: 0 };
+		if (command === "git diff main") return { stdout: "diff --git a/src/file.ts b/src/file.ts\n--- a/src/file.ts\n+++ b/src/file.ts\n@@ -1,3 +1,5 @@\n+// change\n", stderr: "", code: 0 };
 		if (command === "git status --short") return { stdout: "M src/file.ts\n", stderr: "", code: 0 };
-		if (command === "git diff --stat") return { stdout: " src/file.ts | 1 +\n", stderr: "", code: 0 };
-		if (command.startsWith("git diff -- ")) return { stdout: "diff\n", stderr: "", code: 0 };
 		if (command.startsWith("gh pr view ")) return { stdout: "", stderr: "not found", code: 1 };
 		if (command.startsWith("git add ")) return { stdout: "", stderr: "", code: 0 };
 		if (command.startsWith("git commit -m ")) return { stdout: "[worktree/feature-j abc123] fallback\n", stderr: "", code: 0 };
@@ -838,6 +837,7 @@ test("Existing PR already open for branch causes /worktree-pr to surface the exi
 		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
 		if (command === "git branch --show-current") return { stdout: "worktree/feature-k\n", stderr: "", code: 0 };
 		if (command === "gh auth status") return { stdout: "Logged in to github.com\n", stderr: "", code: 0 };
+		if (command === "git diff main") return { stdout: "", stderr: "", code: 0 };
 		if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
 		if (command === "git push -u origin worktree/feature-k") return { stdout: "", stderr: "", code: 0 };
 		if (command.startsWith("gh pr view ")) return { stdout: "https://github.com/org/repo/pull/126\n", stderr: "", code: 0 };
