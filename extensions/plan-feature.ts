@@ -223,8 +223,12 @@ async function setPlanningWidget(ctx: any, active: boolean, draftReady: boolean)
 	}
 
 	if (typeof ctx.ui.setWidget === "function") {
-		if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(PLANNING_WIDGET_ID, [text]);
-		else ctx.ui.setWidget(text);
+		const renderer = (_tui: any, theme: any) => {
+			const coloredText = theme && typeof theme.fg === "function" ? theme.fg("error", text) : text;
+			return { lines: [coloredText], invalidate: () => {} };
+		};
+		if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(PLANNING_WIDGET_ID, renderer);
+		else ctx.ui.setWidget(renderer);
 	}
 }
 

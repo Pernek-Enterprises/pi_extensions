@@ -72,6 +72,7 @@ function collectRegisteredCommands(
 ): Map<string, (args: string, ctx: ReturnType<typeof makeCtx>) => Promise<unknown>> {
 	const map = new Map<string, (args: string, ctx: ReturnType<typeof makeCtx>) => Promise<unknown>>();
 
+
 	const mockPi = {
 		registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: any) => Promise<void> }) => {
 			map.set(name, options.handler);
