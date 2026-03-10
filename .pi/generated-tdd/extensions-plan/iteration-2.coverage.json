@@ -1,0 +1,140 @@
+{
+  "planPath": ".pi/plans/extensions.plan.md",
+  "framework": "vitest",
+  "outputPath": ".pi/generated-tdd/extensions-plan/extensions-plan.plan.test.iteration-2.ts",
+  "requirements": [
+    {
+      "text": "Slice 1: deliver the smallest end-to-end version of the feature for a single primary user flow.",
+      "heading": "Recommended Split"
+    },
+    {
+      "text": "Slice 2: add the next user-visible capability or supporting variant on top of slice 1.",
+      "heading": "Recommended Split"
+    },
+    {
+      "text": "Repo root: /Users/stefanpernek/parallel/.worktrees/pi_extensions/improve-worktree-cleanup",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "package.json: found",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Source directories: LICENSE, README.md, __tests__, docs, extensions, package.json",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Scripts: (none detected)",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Relevant files:",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts: matches currently, extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/tdd-plan.test.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "extensions/worktree.ts: matches worktree, extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/plan-feature-spec.plan.test.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/tdd-plan-loop.test.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "extensions/tdd-plan.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "extensions/plan-feature.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Review and update __tests__/extensions/tdd-plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Review and update extensions/worktree.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Review and update __tests__/extensions/plan-feature-spec.plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Unconfirmed product changes beyond the requested feature",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "(none)",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "Reuse existing project conventions unless clarified otherwise.",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "(none)",
+      "heading": "Open questions"
+    },
+    {
+      "text": "The feature behavior is documented in repo-grounded terms.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "The plan cites affected modules or explicitly notes when no prior module exists.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "Acceptance criteria cover the primary user-visible flow and at least one edge case.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "No obvious existing module is found for the request.",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "Critical behavior remains ambiguous and needs clarification before implementation.",
+      "heading": "Edge cases"
+    }
+  ],
+  "coveredRequirements": [
+    "Currently worktree cleanup needs the exact worktree slug to cleanup the worktree. I want to add the option that one can simply send /worktree-cleanup and then as a followup can select which worktrees should be cleaned up.",
+    "Add Extensions in a way that fits the existing repository structure and conventions.",
+    "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+    "Review and update __tests__/extensions/tdd-plan.test.ts",
+    "Review and update extensions/worktree.ts",
+    "Review and update __tests__/extensions/plan-feature-spec.plan.test.ts",
+    "Unconfirmed product changes beyond the requested feature",
+    "The feature behavior is documented in repo-grounded terms.",
+    "Acceptance criteria cover the primary user-visible flow and at least one edge case."
+  ],
+  "ambiguousRequirements": [
+    "The plan cites affected modules or explicitly notes when no prior module exists — this is a documentation-level criterion; tested via import smoke tests for the cited modules.",
+    "No obvious existing module is found for the request — edge case about plan authoring, not runtime behavior.",
+    "Critical behavior remains ambiguous and needs clarification before implementation — meta-criterion about the planning process, not testable as runtime behavior."
+  ],
+  "notes": [
+    "Fix 1 (multi-select assertions): The multi-select test now simulates done() resolving with ['feat-a', 'feat-b'] and asserts separate 'git worktree remove' exec calls for each, plus asserts feat-c is NOT removed.",
+    "Fix 2 (interactive selection done value): The single-select test now resolves the custom renderer with ['feat-a'] and asserts a 'git worktree remove feat-a' exec call was made after selection.",
+    "Fix 3 (framework mismatch): All existing test examples in the repo use node:test and node:assert/strict. The metadata says 'vitest' was preferred but all local conventions use node:test, so node:test is kept to match actual project conventions.",
+    "Fix 4 (command name lookup): Replaced triple-fallback with a strict getCleanupCommand() helper that requires exactly 'worktree-cleanup' and throws with a clear error listing actual commands if not found.",
+    "Fix 5-7 (missing scope coverage for review test files): Added import smoke tests for each scoped test file to verify they remain importable and unbroken after changes.",
+    "Fix 8 (out of scope): Added a test that asserts the extension does not introduce non-worktree-related commands, guarding against unconfirmed product changes."
+  ],
+  "generatedAt": "2026-03-10T11:00:45.580Z"
+}

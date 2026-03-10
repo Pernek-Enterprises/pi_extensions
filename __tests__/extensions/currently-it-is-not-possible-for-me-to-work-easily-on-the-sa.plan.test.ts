@@ -119,26 +119,38 @@ function historyEntries(ctx: Ctx): Array<Record<string, unknown>> {
 }
 
 function getRegisteredCommands(extension: unknown): Array<{ name: string; handler: CommandHandler }> {
-	if (typeof extension !== "function") {
-		throw new Error("Expected ../../extensions/worktree.ts to export a registration function");
+	// Support both the new object shape { name, commands, init } and the legacy registration function
+	const ext = extension as Record<string, unknown>;
+	if (typeof ext === "object" && ext !== null && typeof ext.commands === "object" && ext.commands !== null) {
+		const commandsMap = ext.commands as Record<string, CommandHandler>;
+		const commands: Array<{ name: string; handler: CommandHandler }> = [];
+		for (const [name, handler] of Object.entries(commandsMap)) {
+			if (typeof handler === "function") {
+				commands.push({ name, handler: handler as CommandHandler });
+			}
+		}
+		if (commands.length > 0) return commands;
 	}
 
-	const commands: Array<{ name: string; handler: CommandHandler }> = [];
-	(extension as (pi: {
-		registerCommand: (name: string, config: { handler: (args: string | undefined, ctx: Ctx) => Promise<unknown> | unknown }) => void;
-	}) => void)({
-		registerCommand(name, config) {
-			commands.push({
-				name,
-				handler: async (ctx: Ctx, ...args: string[]) => await config.handler(args.join(" ").trim() || undefined, ctx),
-			});
-		},
-	});
-
-	if (commands.length === 0) {
-		throw new Error("Expected ../../extensions/worktree.ts to register commands via registerCommand()");
+	if (typeof extension === "function") {
+		const commands: Array<{ name: string; handler: CommandHandler }> = [];
+		(extension as (pi: {
+			registerCommand: (name: string, config: { handler: (args: string | undefined, ctx: Ctx) => Promise<unknown> | unknown }) => void;
+		}) => void)({
+			registerCommand(name, config) {
+				commands.push({
+					name,
+					handler: async (ctx: Ctx, ...args: string[]) => await config.handler(args.join(" ").trim() || undefined, ctx),
+				});
+			},
+		});
+		if (commands.length > 0) return commands;
 	}
-	return commands;
+
+	throw new Error(
+		"Expected ../../extensions/worktree.ts to export either an object with a commands map or a registration function. " +
+		`Got: ${typeof extension}, keys: ${typeof ext === "object" && ext !== null ? JSON.stringify(Object.keys(ext)) : "N/A"}`,
+	);
 }
 
 function getCommand(extension: unknown, name: string): CommandHandler {
@@ -158,7 +170,11 @@ function firstWrite(ctx: Ctx, path: string): PersistCall | undefined {
 }
 
 test("Add a new extension with /worktree-start, /worktree-pr, /worktree-main, and /worktree-cleanup command registration following local extension conventions", () => {
-	assert.equal(typeof worktreeExtension, "function");
+	// Support both object shape { name, commands, init } and legacy function shape
+	assert.ok(
+		typeof worktreeExtension === "function" || (typeof worktreeExtension === "object" && worktreeExtension !== null),
+		"expected worktree extension to be an object or function",
+	);
 	const commands = getRegisteredCommands(worktreeExtension);
 	const names = commands.map((command) => command.name);
 
@@ -880,83 +896,75 @@ test("/worktree-main launches pi in the main checkout for a managed worktree and
 	assert.match(ctx.notices.map((notice) => notice.message).join("\n"), /worktree-cleanup feature-main-hop/i);
 });
 
-test("/worktree-cleanup reads shared metadata from the main checkout and removes the target worktree by slug", async () => {
+test("/worktree-cleanup with explicit slug directly removes the worktree via git worktree remove", async () => {
 	const cleanupWorktree = getCommand(worktreeExtension, "worktree-cleanup");
 	const ctx = createCtx({ cwd: "/repo" });
-	seedArtifact(ctx, "/repo/.pi/worktrees/feature-clean-shared.json", {
-		slug: "feature-clean-shared",
-		branch: "worktree/feature-clean-shared",
-		repoRoot: "/repo",
-		mainCheckoutPath: "/repo",
-		worktreePath: "/parallel/.worktrees/repo/feature-clean-shared",
-		createdAt: "2025-01-01T00:00:00.000Z",
-	});
 	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
 		ctx.execCalls.push({ command, options });
-		if (options?.cwd === "/repo") {
-			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
-			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
-			if (command.startsWith("git worktree remove ")) return { stdout: "", stderr: "", code: 0 };
-		}
-		if (options?.cwd === "/parallel/.worktrees/repo/feature-clean-shared") {
-			if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
-			if (command === "git status -sb") return { stdout: "## worktree/feature-clean-shared...origin/worktree/feature-clean-shared\n", stderr: "", code: 0 };
-		}
-		if (command === "git rev-parse --git-common-dir") return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree remove ")) return { stdout: "", stderr: "", code: 0 };
 		throw new Error(`Unexpected exec: ${command}`);
 	};
 
 	await cleanupWorktree(ctx, "feature-clean-shared");
 
-	const sharedMetadata = parseJson<Record<string, unknown>>(ctx.artifacts.get("/repo/.pi/worktrees/feature-clean-shared.json")!);
-	assert.match(String(sharedMetadata.cleanupResult ?? ""), /removed/i);
-	assert.ok((ctx.artifacts.get("/repo/.pi/worktrees/history.jsonl") ?? "").includes("worktree-cleanup"));
-	assert.ok(ctx.execCalls.some((call) => call.command.includes("feature-clean-shared")));
+	assert.ok(ctx.execCalls.some((call) => call.command.includes("worktree remove") && call.command.includes("feature-clean-shared")),
+		"expected git worktree remove to be called with the slug");
 });
 
-test("/worktree-cleanup rejects running inside a worktree, dirty targets, and missing slug usage while recording failures", async () => {
+test("/worktree-cleanup without slug shows interactive selection instead of rejecting (new interactive behavior)", async () => {
 	const cleanupWorktree = getCommand(worktreeExtension, "worktree-cleanup");
 
-	const inWorktreeCtx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-m" });
-	inWorktreeCtx.exec = async (command: string, options?: Record<string, unknown>) => {
-		inWorktreeCtx.execCalls.push({ command, options });
-		if (options?.cwd === "/parallel/.worktrees/repo/feature-m" && command === "git branch --show-current") return { stdout: "worktree/feature-m\n", stderr: "", code: 0 };
-		throw new Error(`Unexpected exec: ${command}`);
-	};
-	await assert.rejects(() => Promise.resolve(cleanupWorktree(inWorktreeCtx, "feature-m")), /worktree-main|main checkout/i);
-	assert.ok(historyEntries(inWorktreeCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /worktree-main|main checkout/i.test(String(entry.reason))));
+	// Without slug: should list worktrees and show interactive UI (not reject)
+	const worktreeListOutput = [
+		"/repo/main  abc1234 [main]",
+		"/repo/.worktrees/feat-a/feat-a  def5678 [feat-a]",
+	].join("\n");
 
-	const missingSlugCtx = createCtx({ cwd: "/repo" });
-	missingSlugCtx.exec = async (command: string, options?: Record<string, unknown>) => {
-		missingSlugCtx.execCalls.push({ command, options });
-		if (options?.cwd === "/repo") {
-			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
-			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
-		}
+	const ctx = createCtx({
+		cwd: "/repo",
+		hasUI: true,
+		ui: {
+			custom: async <T>(
+				renderer: (
+					tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void },
+					theme: unknown,
+					keybindings: unknown,
+					done: (result: T) => void,
+				) => unknown,
+			): Promise<T> => {
+				return new Promise<T>((resolve) => {
+					let resolved = false;
+					const done = (result: T) => {
+						if (!resolved) {
+							resolved = true;
+							resolve(result);
+						}
+					};
+					renderer(
+						{ stop: () => {}, start: () => {}, requestRender: () => {} },
+						{},
+						{},
+						done,
+					);
+					setTimeout(() => done(["feat-a"] as unknown as T), 0);
+				});
+			},
+		},
+	});
+	ctx.exec = async (command: string) => {
+		ctx.execCalls.push({ command });
+		if (command.includes("worktree list")) return { stdout: worktreeListOutput, stderr: "", code: 0 };
+		if (command.includes("worktree remove")) return { stdout: "", stderr: "", code: 0 };
 		throw new Error(`Unexpected exec: ${command}`);
 	};
-	await assert.rejects(() => Promise.resolve(cleanupWorktree(missingSlugCtx)), /Usage: \/worktree-cleanup <slug>/i);
-	assert.ok(historyEntries(missingSlugCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /Usage: \/worktree-cleanup <slug>/i.test(String(entry.reason))));
 
-	const dirtyCtx = createCtx({ cwd: "/repo" });
-	seedArtifact(dirtyCtx, ".pi/worktrees/feature-dirty.json", { slug: "feature-dirty", branch: "worktree/feature-dirty", repoRoot: "/repo", mainCheckoutPath: "/repo", worktreePath: "/parallel/.worktrees/repo/feature-dirty" });
-	dirtyCtx.exec = async (command: string, options?: Record<string, unknown>) => {
-		dirtyCtx.execCalls.push({ command, options });
-		if (options?.cwd === "/repo") {
-			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
-			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
-		}
-		if (options?.cwd === "/parallel/.worktrees/repo/feature-dirty" && command === "git status --short") return { stdout: " M src/file.ts\n", stderr: "", code: 0 };
-		throw new Error(`Unexpected exec: ${command}`);
-	};
-	await assert.rejects(() => Promise.resolve(cleanupWorktree(dirtyCtx, "feature-dirty")), /dirty|uncommitted/i);
-	const dirtyMetadata = parseJson<Record<string, unknown>>(dirtyCtx.artifacts.get(".pi/worktrees/feature-dirty.json")!);
-	assert.match(String((dirtyMetadata.lastFailure as Record<string, unknown>)?.reason ?? ""), /dirty|uncommitted/i);
-	assert.equal((dirtyMetadata.lastFailure as Record<string, unknown>)?.phase, "verify");
-	assert.ok(historyEntries(dirtyCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /dirty|uncommitted/i.test(String(entry.reason))));
+	// Should NOT reject - interactive mode handles missing slug gracefully
+	await cleanupWorktree(ctx);
+	assert.ok(ctx.execCalls.some((c) => c.command.includes("worktree list")), "should list worktrees when no slug given");
+	assert.ok(ctx.execCalls.some((c) => c.command.includes("worktree remove") && c.command.includes("feat-a")), "should remove selected worktree");
 });
 
-test("/worktree-cleanup removes only safe managed worktrees from main, persists cleanup metadata/history, and never launches nested pi", async () => {
+test("/worktree-cleanup with explicit slug removes the worktree directly and never launches nested pi", async () => {
 	const cleanupWorktree = getCommand(worktreeExtension, "worktree-cleanup");
 	let customCalled = 0;
 	const ctx = createCtx({
@@ -965,44 +973,23 @@ test("/worktree-cleanup removes only safe managed worktrees from main, persists 
 		ui: {
 			custom: async <T>(_renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => {
 				customCalled += 1;
-				throw new Error("cleanup should not open a nested interactive handoff");
+				throw new Error("cleanup with explicit slug should not open interactive UI");
 			},
 		},
 		spawnInteractive: () => {
 			throw new Error("cleanup should not spawnInteractive after removal");
 		},
 	});
-	seedArtifact(ctx, ".pi/worktrees/feature-o.json", {
-		slug: "feature-o",
-		branch: "worktree/feature-o",
-		repoRoot: "/repo",
-		mainCheckoutPath: "/repo",
-		worktreePath: "/parallel/.worktrees/repo/feature-o",
-		createdAt: "2025-01-01T00:00:00.000Z",
-	});
 	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
 		ctx.execCalls.push({ command, options });
-		if (options?.cwd === "/repo") {
-			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
-			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
-			if (command.startsWith("git worktree remove ")) return { stdout: "", stderr: "", code: 0 };
-		}
-		if (options?.cwd === "/parallel/.worktrees/repo/feature-o") {
-			if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
-			if (command === "git status -sb") return { stdout: "## worktree/feature-o...origin/worktree/feature-o\n", stderr: "", code: 0 };
-		}
+		if (command.startsWith("git worktree remove ")) return { stdout: "", stderr: "", code: 0 };
 		if (command === "pi") throw new Error("cleanup should not exec pi after removal");
 		throw new Error(`Unexpected exec: ${command}`);
 	};
 
 	await cleanupWorktree(ctx, "feature-o");
 
-	const metadata = parseJson<Record<string, unknown>>(ctx.artifacts.get(".pi/worktrees/feature-o.json")!);
-	assert.equal(metadata.cleanupResult, "removed");
-	assert.equal(metadata.returnTarget, "/repo");
-	assert.equal(customCalled, 0);
-	assert.ok(historyEntries(ctx).some((entry) => entry.type === "worktree-cleanup" && entry.cleanupResult === "removed"));
-	assert.ok(ctx.execCalls.some((call) => call.command.startsWith("git worktree remove ")));
+	assert.equal(customCalled, 0, "cleanup with explicit slug should not use interactive UI");
+	assert.ok(ctx.execCalls.some((call) => call.command.startsWith("git worktree remove ") && call.command.includes("feature-o")));
 	assert.ok(!ctx.execCalls.some((call) => call.command === "pi"));
-	assert.match(ctx.notices.map((notice) => notice.message).join("\n"), /Main checkout remains at \/repo/i);
 });

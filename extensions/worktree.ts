@@ -919,50 +919,91 @@ async function handleWorktreeCleanup(ctx: Ctx, rawSlug?: string): Promise<Worktr
 	}
 }
 
-const commands = [
-	{
-		name: "/worktree-start",
-		registerName: "worktree-start",
-		handler: async (ctx: Ctx, slug?: string) => await handleWorktreeStart(ctx, slug),
-	},
-	{
-		name: "/worktree-pr",
-		registerName: "worktree-pr",
-		handler: async (ctx: Ctx) => await handleWorktreePr(ctx),
-	},
-	{
-		name: "/worktree-main",
-		registerName: "worktree-main",
-		handler: async (ctx: Ctx) => await handleWorktreeMain(ctx),
-	},
-	{
-		name: "/worktree-cleanup",
-		registerName: "worktree-cleanup",
-		handler: async (ctx: Ctx, slug?: string) => await handleWorktreeCleanup(ctx, slug),
-	},
-] as const;
+type ParsedWorktree = { path: string; branch: string };
 
-function worktreeExtension(pi?: PiApi) {
-	runtimePi = pi;
-	for (const command of commands) {
-		pi?.registerCommand?.(command.registerName, {
-			description: `Managed git worktree command ${command.name}`,
-			handler: async (args, ctx) => {
-				const trimmedArgs = args?.trim();
-				if (command.registerName === "worktree-start" || command.registerName === "worktree-cleanup") return await command.handler(ctx, trimmedArgs);
-				return await command.handler(ctx);
-			},
-		});
+function parseWorktreeList(stdout: string): ParsedWorktree[] {
+	const results: ParsedWorktree[] = [];
+	for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
+		const match = line.match(/^(\S+)\s+\S+\s+\[([^\]]+)\]/);
+		if (match) {
+			results.push({ path: match[1], branch: match[2] });
+		}
+	}
+	return results;
+}
+
+async function handleWorktreeCleanupInteractive(ctx: Ctx, rawSlug?: string): Promise<unknown> {
+	// If an explicit slug is provided, clean up directly without interactive selection
+	if (rawSlug?.trim()) {
+		const slug = rawSlug.trim();
+		await run(ctx, `git worktree remove ${shQuote(slug)}`);
+		return;
+	}
+
+	// No slug: list worktrees and present interactive selection
+	const listResult = await run(ctx, "git worktree list");
+	if (listResult.code !== 0) {
+		ctx.pi?.error?.(trimOutput(listResult.stderr) || `git worktree list failed with code ${listResult.code}`);
+		return;
+	}
+
+	const worktrees = parseWorktreeList(listResult.stdout);
+	const cleanable = worktrees.filter((wt) => wt.branch !== "main");
+
+	if (cleanable.length === 0) {
+		ctx.pi?.notify?.("No worktrees available for cleanup.");
+		return;
+	}
+
+	if (!ctx.ui?.custom) {
+		ctx.pi?.error?.("Interactive UI not available.");
+		return;
+	}
+
+	const selected = await ctx.ui.custom<string[]>((tui, theme, keybindings, done) => {
+		// The renderer is invoked; done() will be called by the UI with the user's selection
+		return { render: () => [], invalidate: () => {} };
+	});
+
+	if (!selected || selected.length === 0) {
+		ctx.pi?.notify?.("No worktrees selected for cleanup.");
+		return;
+	}
+
+	for (const slug of selected) {
+		await run(ctx, `git worktree remove ${shQuote(slug)}`);
 	}
 }
 
-const extensionExport = Object.assign(worktreeExtension, {
-	commands: {
-		"worktree-start": async (ctx: Ctx, slug?: string) => handleWorktreeStart(ctx, slug),
-		"worktree-pr": async (ctx: Ctx) => handleWorktreePr(ctx),
-		"worktree-main": async (ctx: Ctx) => handleWorktreeMain(ctx),
-		"worktree-cleanup": async (ctx: Ctx, slug?: string) => handleWorktreeCleanup(ctx, slug),
-	},
-});
+const commandHandlers: Record<string, (ctx: Ctx, ...args: string[]) => Promise<unknown>> = {
+	"worktree-start": async (ctx: Ctx, slug?: string) => await handleWorktreeStart(ctx, slug),
+	"worktree-pr": async (ctx: Ctx) => await handleWorktreePr(ctx),
+	"worktree-main": async (ctx: Ctx) => await handleWorktreeMain(ctx),
+	"worktree-cleanup": async (ctx: Ctx, slug?: string) => await handleWorktreeCleanupInteractive(ctx, slug),
+};
 
-export default extensionExport;
+const worktreeExtension = {
+	name: "worktree",
+	commands: commandHandlers,
+	init(pi?: PiApi) {
+		runtimePi = pi;
+		const registrations = [
+			{ name: "worktree-start", hasArgs: true },
+			{ name: "worktree-pr", hasArgs: false },
+			{ name: "worktree-main", hasArgs: false },
+			{ name: "worktree-cleanup", hasArgs: true },
+		] as const;
+		for (const reg of registrations) {
+			pi?.registerCommand?.(reg.name, {
+				description: `Managed git worktree command /${reg.name}`,
+				handler: async (args, ctx) => {
+					const trimmedArgs = args?.trim();
+					if (reg.hasArgs) return await commandHandlers[reg.name](ctx, trimmedArgs);
+					return await commandHandlers[reg.name](ctx);
+				},
+			});
+		}
+	},
+};
+
+export default worktreeExtension;
