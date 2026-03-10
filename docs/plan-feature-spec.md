@@ -218,7 +218,14 @@ Behavior:
 - if a finalized draft exists, save it
 - if only a partial draft exists, ask whether to save partial
 - if no draft exists, ask the agent to synthesize the current best plan first
-- optionally save metadata JSON alongside it
+- save a sibling machine-oriented TDD artifact alongside the markdown at:
+
+```text
+.pi/plans/<slug>.plan.tdd.json
+```
+
+- the markdown remains human-facing
+- the `.plan.tdd.json` sidecar is the distilled contract for `/tdd-plan` and `/tdd-plan-loop`
 
 ---
 
@@ -481,56 +488,47 @@ The planner should normally ask **3–5 questions max per round**.
 
 ## 11. Final markdown output spec
 
-The final markdown must be structured and downstream-friendly.
+The final markdown should be **short, clear, and easy to scan**.
 
-Required sections:
+Rules:
+
+- prefer short bullets over long prose
+- omit empty sections
+- omit boilerplate filler like `(none)`
+- keep only the sections that add real value for the current feature
+
+Typical shape:
 
 ```md
 # Plan: <title>
-
-## Recommended Split
-- Only include when the feature should clearly be delivered in multiple smaller vertical slices
-- Each split must be a full end-to-end slice of user value
-- Never split by frontend/backend layers
 
 ## Requested feature
 <original brief>
 
 ## Existing codebase context
-- explicit repo findings
-- relevant files and what they already do
-
-## Problem statement
-<why this feature exists>
-
-## Scope
-- item
-- item
-
-## Out of scope
-- item
-- item
+- relevant files
+- important repo facts
 
 ## Clarified decisions
-- decision + rationale
-
-## Assumptions
-- assumption
+- concrete decision
 
 ## Open questions
-- unresolved item
+- unresolved blocker or important uncertainty
 
 ## Acceptance criteria
 - concrete behavior
-- concrete behavior
 
 ## Edge cases
-- edge case
-- failure mode
+- concrete failure mode or variant
 ```
 
-Optional sections if relevant:
+Sections like these are optional and should only appear when they help:
 
+- Recommended Split
+- Problem statement
+- Scope
+- Out of scope
+- Assumptions
 - Data model changes
 - API changes
 - Rollout / migration
@@ -544,17 +542,38 @@ Optional sections if relevant:
 
 This extension is the upstream planning stage for the existing `tdd-plan` extension.
 
-### Output design constraints
-The saved markdown should be written so `tdd-plan` can extract useful requirements from:
+### Preferred downstream contract
+`/plan-save` should write two artifacts:
 
-- `## Recommended Split` (when present)
-- `## Scope`
+- human-facing markdown: `.plan.md`
+- machine-facing TDD sidecar: `.plan.tdd.json`
+
+`tdd-plan` should prefer the `.plan.tdd.json` sidecar when present and fall back to markdown parsing only when the sidecar is missing.
+
+### Sidecar purpose
+The sidecar should strip planning boilerplate and keep only the information useful for test generation, such as:
+
+- behavioral requirements
+- testable operational requirements
+- blocking ambiguities relevant to grounded test generation
+- repo-grounding hints
+- generation constraints like “forbid invented APIs”
+
+### Markdown guidance
+The saved markdown should still be written cleanly for humans:
+
+- keep it short
+- keep bullets concrete
+- keep only the sections that matter for the current feature
+
+These sections are especially downstream-friendly when present:
+
 - `## Clarified decisions`
 - `## Acceptance criteria`
 - `## Edge cases`
 
 ### Recommendation
-Favor bullet lists for these sections, because `tdd-plan.ts` already extracts bullet and numbered requirements.
+Favor short bullet lists for these sections so both humans and the generated sidecar can preserve clear requirement boundaries.
 
 Example:
 

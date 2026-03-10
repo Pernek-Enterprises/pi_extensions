@@ -131,6 +131,84 @@ Retrying a failed notification queues exactly one new delivery attempt and leave
 	]);
 });
 
+
+test("collectBehavioralTargets ignores legacy meta bullets and empty placeholders from saved plans", () => {
+	const markdown = `# Plan: Add recurring invoices
+
+## Acceptance criteria
+- Users can pause recurring invoices
+- The plan cites affected modules or explicitly notes when no prior module exists.
+- (none)
+
+## Scope
+- Review and update src/invoices/service.ts
+- Audit log entries are visible after pause/resume
+`;
+
+	assert.deepEqual(__testables.collectBehavioralTargets(markdown, []), [
+		{
+			heading: "Acceptance criteria",
+			text: "Users can pause recurring invoices",
+			source: "acceptance",
+		},
+		{
+			heading: "Scope",
+			text: "Audit log entries are visible after pause/resume",
+			source: "scope",
+		},
+	]);
+});
+
+test("buildMachineArtifactPath prefers sibling .plan.tdd.json files", () => {
+	assert.equal(
+		__testables.buildMachineArtifactPath("/repo/.pi/plans/login.plan.md"),
+		"/repo/.pi/plans/login.plan.tdd.json",
+	);
+});
+
+test("buildMachinePlanPromptSummary turns the machine artifact into prioritized requirements", () => {
+	const summary = __testables.buildMachinePlanPromptSummary({
+		version: 1,
+		sourcePlanPath: ".pi/plans/login.plan.md",
+		title: "Add login",
+		requestedFeature: "Add password login",
+		behavioralRequirements: [
+			{ id: "AC1", text: "Users can sign in with email and password", sourceSection: "Acceptance criteria" },
+		],
+		testableOperationalRequirements: [
+			{ id: "OP1", text: "Failed login emits an audit log event", sourceSection: "Clarified decisions" },
+		],
+		blockingAmbiguities: [
+			{ id: "AMB1", text: "The supported auth seam is unclear", blocksTdd: true, sourceSection: "Open questions" },
+		],
+		advisoryAmbiguities: [],
+		outOfScope: [],
+		repoGrounding: { repoContextSummary: "Found auth service and tests.", relevantFiles: [{ path: "src/auth/service.ts" }] },
+		generationConstraints: { preferRepoGroundedTests: true, forbidInventedApis: true, preferBehavioralAssertions: true },
+	});
+
+	assert.deepEqual(summary.requirements, [
+		{ text: "Add password login", heading: "Requested feature" },
+		{ text: "Users can sign in with email and password", heading: "Acceptance criteria" },
+		{ text: "Failed login emits an audit log event", heading: "Clarified decisions" },
+		{ text: "The supported auth seam is unclear", heading: "Open questions" },
+	]);
+	assert.match(summary.text, /Title: Add login/);
+	assert.match(summary.text, /Users can sign in with email and password/);
+	assert.match(summary.text, /Failed login emits an audit log event/);
+	assert.match(summary.text, /The supported auth seam is unclear/);
+});
+
+test("detectCoverageGaps ignores legacy meta bullets and review-update boilerplate", () => {
+	const findings = __testables.detectCoverageGaps([
+		{ heading: "Acceptance criteria", text: "Users can pause recurring invoices" },
+		{ heading: "Acceptance criteria", text: "The plan cites affected modules or explicitly notes when no prior module exists." },
+		{ heading: "Scope", text: "Review and update src/invoices/service.ts" },
+	], ["Users can pause recurring invoices"]);
+
+	assert.deepEqual(findings, []);
+});
+
 test("pickDefaultOutputPath ignores unsafe model output outside the repo", () => {
 	const rootDir = "/repo";
 	const planPath = "/repo/plans/feature.md";

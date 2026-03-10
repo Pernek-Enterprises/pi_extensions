@@ -80,13 +80,48 @@ test("applyPlanningState only persists materially changed state and draft payloa
 	assert.equal(entryLog.filter((entry) => entry.type === "planning-draft").length, 1);
 });
 
+test("loadPersistedPlanningState restores legacy value-shaped planning entries too", () => {
+	const persisted = {
+		active: true,
+		originId: "leaf-1",
+		id: "plan-1",
+		title: "Add recurring invoices",
+		slug: "add-recurring-invoices",
+		originalInput: "Add recurring invoices",
+		status: "drafting",
+		repoRoot: "/repo",
+		createdAt: "2025-01-01T00:00:00.000Z",
+		updatedAt: "2025-01-01T00:00:00.000Z",
+		relevantFiles: [],
+		questions: [],
+		assumptions: [],
+		decisions: [],
+	};
+	const ctx = {
+		state: {},
+		sessionManager: {
+			getEntries() {
+				return [{ type: "planning-session", value: persisted }];
+			},
+		},
+	};
+
+	assert.deepEqual(__testables.loadPersistedPlanningState(ctx), persisted);
+	assert.deepEqual(__testables.getPlanningState(ctx), persisted);
+});
+
 test("setPlanningWidget(ctx, active) shows 'Planning session active, return with /end-planning' and clears it when inactive", async () => {
 	const widgetCalls: string[] = [];
 	const cleared: string[] = [];
 	const ctx = {
 		ui: {
-			setWidget(text: string) {
-				widgetCalls.push(text);
+			setWidget(widget: any) {
+				if (typeof widget === "function") {
+					const rendered = widget(null, { fg: (_color: string, value: string) => value }).render(120);
+					widgetCalls.push(String(rendered));
+					return;
+				}
+				widgetCalls.push(String(widget));
 			},
 			clearWidget(id: string) {
 				cleared.push(id);
@@ -178,8 +213,12 @@ test("Start behavior if there is an existing conversation, capture the origin le
 			return { leafId: "branch-2" };
 		},
 		ui: {
-			setWidget(text: string) {
-				widgetMessages.push(text);
+			setWidget(widget: any) {
+				if (typeof widget === "function") {
+					widgetMessages.push(String(widget(null, { fg: (_color: string, value: string) => value }).render(120)));
+					return;
+				}
+				widgetMessages.push(String(widget));
 			},
 		},
 		notify(message: string) {
@@ -342,8 +381,50 @@ test("end-planning detects an unsaved plan and lets the user save it before retu
 	}
 
 	assert.ok(writes.some((file) => file.endsWith(".pi/plans/plan.plan.md")));
+	assert.ok(writes.some((file) => file.endsWith(".pi/plans/plan.plan.tdd.json")));
 	assert.ok(notifications.some((message) => /Plan saved:/i.test(message)));
 	assert.deepEqual(navigations, [{ id: "origin-88", options: { summarize: false } }]);
+});
+
+test("savePlanningDraft writes both markdown and machine artifact sidecar files", async () => {
+	const writes: Array<{ path: string; content?: string }> = [];
+	const originalWriteFile = __testables.__fsWriteFile;
+	const originalMkdir = __testables.__fsMkdir;
+	__testables.__fsWriteFile = async (filePath: string, content?: string) => {
+		writes.push({ path: filePath, content });
+	};
+	__testables.__fsMkdir = async () => {};
+	try {
+		const nextState = await __testables.savePlanningDraft({ hasUI: false, notify() {} }, { appendEntry() {} }, {
+			active: true,
+			originId: "leaf-1",
+			id: "plan-1",
+			title: "Add recurring invoices",
+			slug: "add-recurring-invoices",
+			originalInput: "Add recurring invoices",
+			status: "drafting",
+			repoRoot: "/repo",
+			createdAt: "2025-01-01T00:00:00.000Z",
+			updatedAt: "2025-01-01T00:00:00.000Z",
+			repoContextSummary: "Found invoice modules and tests.",
+			relevantFiles: [{ path: "src/invoices/createInvoice.ts", reason: "invoice creation flow" }],
+			questions: [],
+			assumptions: [],
+			decisions: ["Pause/resume emits an audit log event."],
+			currentDraft: `# Plan: Add recurring invoices\n\n## Requested feature\nAdd recurring invoices\n\n## Acceptance criteria\n- Users can pause recurring invoices\n\n## Edge cases\n- Resuming recalculates the next run date\n`,
+		});
+		assert.equal(nextState?.savedPath, ".pi/plans/add-recurring-invoices.plan.md");
+		assert.equal(nextState?.savedMachinePath, ".pi/plans/add-recurring-invoices.plan.tdd.json");
+	} finally {
+		__testables.__fsWriteFile = originalWriteFile;
+		__testables.__fsMkdir = originalMkdir;
+	}
+
+	assert.ok(writes.some((entry) => entry.path.endsWith(".pi/plans/add-recurring-invoices.plan.md")));
+	const machineWrite = writes.find((entry) => entry.path.endsWith(".pi/plans/add-recurring-invoices.plan.tdd.json"));
+	assert.ok(machineWrite, "expected machine artifact sidecar write");
+	assert.match(machineWrite?.content ?? "", /"behavioralRequirements"/);
+	assert.match(machineWrite?.content ?? "", /"forbidInventedApis": true/);
 });
 
 test("end-planning detects an unsaved plan and lets the user discard it before returning", async () => {
@@ -470,6 +551,8 @@ test("buildPlanningSystemPrompt includes important constraints for performance, 
 test("buildFinalizationPrompt for /plan-done asks the agent to stop questioning and finalize the plan", () => {
 	const prompt = __testables.buildFinalizationPrompt();
 	assert.match(prompt, /stop questioning and finalize the plan/i);
+	assert.match(prompt, /short structured markdown/i);
+	assert.match(prompt, /omit empty\/boilerplate sections/i);
 	assert.match(prompt, /suggest \/plan-save/i);
 });
 
@@ -512,6 +595,100 @@ test("final plan markdown output omits Recommended Split when not provided", () 
 	});
 
 	assert.doesNotMatch(markdown, /^## Recommended Split$/m);
+});
+
+test("final plan markdown output omits empty sections and (none) boilerplate", () => {
+	const markdown = __testables.renderPlanMarkdown({
+		title: "Add recurring invoices",
+		originalInput: "Add recurring invoices",
+		acceptanceCriteria: ["Users can pause an active recurring invoice"],
+	});
+
+	assert.match(markdown, /^## Requested feature$/m);
+	assert.match(markdown, /^## Acceptance criteria$/m);
+	assert.doesNotMatch(markdown, /^## Existing codebase context$/m);
+	assert.doesNotMatch(markdown, /^## Open questions$/m);
+	assert.doesNotMatch(markdown, /\(none\)/i);
+});
+
+test("buildPlanMachineArtifactPath writes a sibling .plan.tdd.json artifact", () => {
+	assert.equal(
+		__testables.buildPlanMachineArtifactPath("/repo/.pi/plans/add-recurring-invoices.plan.md"),
+		"/repo/.pi/plans/add-recurring-invoices.plan.tdd.json",
+	);
+});
+
+test("buildPlanMachineArtifact extracts behavioral requirements and filters plan boilerplate", () => {
+	const artifact = __testables.buildPlanMachineArtifact(`
+# Plan: Add recurring invoices
+
+## Requested feature
+Add recurring invoices.
+
+## Clarified decisions
+- Pause/resume emits an audit log event.
+- The plan cites affected modules or explicitly notes when no prior module exists.
+
+## Open questions
+- Should admins be able to edit cadence after creation?
+- Critical behavior remains ambiguous and needs clarification before implementation.
+
+## Acceptance criteria
+- Users can pause an active recurring invoice.
+- The feature behavior is documented in repo-grounded terms.
+
+## Edge cases
+- Resuming recalculates the next run date.
+`, {
+		title: "Add recurring invoices",
+		originalInput: "Add recurring invoices",
+		repoContextSummary: "Found invoice modules and tests.",
+		relevantFiles: [{ path: "src/invoices/createInvoice.ts", reason: "invoice creation flow" }],
+	}, ".pi/plans/add-recurring-invoices.plan.md");
+
+	assert.equal(artifact.sourcePlanPath, ".pi/plans/add-recurring-invoices.plan.md");
+	assert.deepEqual(artifact.behavioralRequirements.map((item: { text: string }) => item.text), [
+		"Users can pause an active recurring invoice.",
+		"Resuming recalculates the next run date.",
+	]);
+	assert.deepEqual(artifact.testableOperationalRequirements.map((item: { text: string }) => item.text), [
+		"Pause/resume emits an audit log event.",
+	]);
+	assert.deepEqual(artifact.advisoryAmbiguities.map((item: { text: string }) => item.text), [
+		"Should admins be able to edit cadence after creation?",
+	]);
+	assert.deepEqual(artifact.blockingAmbiguities, []);
+	assert.equal(artifact.repoGrounding.relevantFiles[0]?.path, "src/invoices/createInvoice.ts");
+	assert.equal(artifact.generationConstraints.forbidInventedApis, true);
+});
+
+test("synthesizePlanFromState keeps fallback plans minimal and avoids boilerplate sections", () => {
+	const markdown = __testables.synthesizePlanFromState({
+		active: true,
+		originId: "leaf-1",
+		id: "plan-1",
+		title: "Add recurring invoices",
+		slug: "add-recurring-invoices",
+		originalInput: "Add recurring invoices",
+		status: "drafting",
+		repoRoot: "/repo",
+		createdAt: "2025-01-01T00:00:00.000Z",
+		updatedAt: "2025-01-01T00:00:00.000Z",
+		repoContextSummary: "- Relevant files:\n  - src/invoices/createInvoice.ts: invoice creation flow",
+		relevantFiles: [{ path: "src/invoices/createInvoice.ts", reason: "invoice creation flow" }],
+		questions: [{ id: "q-1", question: "Should pause/resume emit audit logs?", status: "open" }],
+		assumptions: [],
+		decisions: ["Use the existing scheduler flow."],
+	});
+
+	assert.match(markdown, /^## Requested feature$/m);
+	assert.match(markdown, /^## Existing codebase context$/m);
+	assert.match(markdown, /^## Clarified decisions$/m);
+	assert.match(markdown, /^## Open questions$/m);
+	assert.doesNotMatch(markdown, /^## Recommended Split$/m);
+	assert.doesNotMatch(markdown, /^## Acceptance criteria$/m);
+	assert.doesNotMatch(markdown, /^## Edge cases$/m);
+	assert.doesNotMatch(markdown, /\(none\)/i);
 });
 
 test("resolvePlanOutputPath keeps saved plans inside the repo root", () => {
