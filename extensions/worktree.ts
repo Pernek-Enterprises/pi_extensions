@@ -20,6 +20,9 @@ type Ctx = {
 	readArtifact?: (path: string) => Promise<string | undefined>;
 	persistCalls?: Array<{ path: string; content: string; mode?: string }>;
 	artifacts?: Map<string, string>;
+	modelRegistry?: {
+		getApiKey?: (model: unknown) => Promise<string | undefined>;
+	};
 	pi?: {
 		notify?: (message: string) => void;
 		warn?: (message: string) => void;
@@ -702,21 +705,71 @@ async function lookupExistingPr(ctx: Ctx, cwd: string, branch: string): Promise<
 	return undefined;
 }
 
+async function askAi(ctx: Ctx, prompt: string, slug: string): Promise<string | undefined> {
+	// Prefer ctx.pi.ask if available (e.g. test/custom runner contexts)
+	if (ctx.pi?.ask) {
+		return await ctx.pi.ask(prompt);
+	}
+
+	// Use pi-ai SDK: find a model and call complete()
+	try {
+		const piAi = await import("@mariozechner/pi-ai");
+		const { complete: piComplete, getModel: piGetModel } = piAi;
+
+		// Try lightweight models first, then fall back
+		const modelCandidates = [
+			{ provider: "anthropic", name: "claude-haiku-4-5" },
+			{ provider: "google", name: "gemini-2.5-flash" },
+			{ provider: "openai", name: "gpt-4.1-mini" },
+			{ provider: "anthropic", name: "claude-sonnet-4-20250514" },
+		];
+
+		for (const candidate of modelCandidates) {
+			const model = piGetModel(candidate.provider, candidate.name);
+			if (!model) continue;
+			const apiKey = ctx.modelRegistry?.getApiKey ? await ctx.modelRegistry.getApiKey(model) : undefined;
+			if (!apiKey) continue;
+
+			const response = await piComplete(
+				model,
+				{
+					messages: [{ role: "user" as const, content: [{ type: "text" as const, text: prompt }], timestamp: Date.now() }],
+				},
+				{ apiKey },
+			);
+
+			const text = response.content
+				.filter((c: { type: string; text?: string }) => c.type === "text")
+				.map((c: { type: string; text?: string }) => c.text ?? "")
+				.join("\n");
+
+			if (text.trim()) return text;
+		}
+	} catch {
+		// pi-ai not available or AI call failed, fall through to programmatic fallback
+	}
+
+	return undefined;
+}
+
 async function getGeneratedTexts(ctx: Ctx, metadata: WorktreeMetadata, branch: string, fullDiff: string) {
 	// Build a programmatic diff-based PR body as a solid baseline
 	const diffBasedBody = buildDiffBasedPrBody(fullDiff, branch, metadata.slug);
 
-	// Try AI-enhanced description if available
-	if (ctx.pi?.ask) {
-		const prompt = [
-			`You are preparing commit and PR text for managed worktree ${metadata.slug}.`,
-			"Return exactly three sections separated by blank lines: commit message, PR title, PR body (in markdown).",
-			"The PR body MUST reference every changed file by name.",
-			`Branch: ${branch}`,
-			`Worktree path: ${metadata.worktreePath}`,
-			fullDiff ? `Full diff:\n${fullDiff}` : "Working tree is clean.",
-		].filter(Boolean).join("\n\n");
-		const aiResult = parseGeneratedTexts(await ctx.pi.ask(prompt), metadata.slug);
+	// Try AI-enhanced description
+	const prompt = [
+		`You are preparing commit and PR text for managed worktree ${metadata.slug}.`,
+		"Return exactly three sections separated by blank lines: commit message, PR title, PR body (in markdown).",
+		"The PR body MUST reference every changed file by name.",
+		`Branch: ${branch}`,
+		`Worktree path: ${metadata.worktreePath}`,
+		fullDiff ? `Full diff:\n${fullDiff}` : "Working tree is clean.",
+	].filter(Boolean).join("\n\n");
+
+	const aiResponse = await askAi(ctx, prompt, metadata.slug);
+
+	if (aiResponse) {
+		const aiResult = parseGeneratedTexts(aiResponse, metadata.slug);
 		// Validate AI result references files from the diff, otherwise use programmatic body
 		const files = parseDiffFiles(fullDiff);
 		const aiBodyReferencesFiles = files.length === 0 || files.some((f) => aiResult.prBody.includes(f));
