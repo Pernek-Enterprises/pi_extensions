@@ -1,0 +1,97 @@
+{
+  "verdict": "fail",
+  "summary": "The test suite fabricates a non-existent API (formatPlanningBanner) and will unconditionally fail with assert.fail() on every test. The plan itself acknowledges critical ambiguity and provides no implementation guidance. Every test is either a source-scanning test or a test against a completely invented function signature, making the suite non-executable and non-behavioral.",
+  "findings": [
+    {
+      "category": "non-executable-or-unrealistic",
+      "severity": "high",
+      "title": "All tests unconditionally fail via assert.fail() because formatPlanningBanner does not exist",
+      "details": "Every test after the first two attempts to find `formatPlanningBanner` on `worktreeExtension` or `planFeatureTestables`. Since this function is entirely fabricated by the test author (not mentioned in the plan, repo, or any existing code), every single test hits the `assert.fail()` branch. The suite produces 8 guaranteed failures with no behavioral verification whatsoever. These are not TDD tests driving an implementation — they are tests against a completely invented API that has no grounding in the repository.",
+      "fix": "The plan is too ambiguous to write meaningful behavioral tests. Either: (1) fail the review and request plan clarification specifying the module, function, and integration point, or (2) if tests must be written, examine the actual existing test file referenced in the plan scope (`currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts`) and base the tests on real exports found there rather than inventing `formatPlanningBanner`.",
+      "requirement": "Plan scope: Review and update existing test file",
+      "evidence": [
+        "let bannerFn: ((state: unknown) => string) | null = null; ... if (!bannerFn) { assert.fail(...); return; }",
+        "typeof (mod as Record<string, unknown>).formatPlanningBanner === 'function' — this function name appears nowhere in the plan or repo"
+      ]
+    },
+    {
+      "category": "superficial-source-tests",
+      "severity": "high",
+      "title": "First test scans module exports by name pattern rather than testing behavior",
+      "details": "The first test ('BLOCKING AMBIGUITY...') iterates over exported keys of candidate modules using a regex `/banner|warning|planning.*display|render.*planning/i` to find function names. This is source-scanning, not behavioral testing. It verifies the existence of a name pattern, not the correctness of any behavior.",
+      "fix": "Remove the export-name-scanning test. If the module and function are unknown, document this as a blocking ambiguity finding rather than writing a test that scans export names.",
+      "evidence": [
+        "Object.keys(mod as Record<string, unknown>).some(key => /banner|warning|planning.*display|render.*planning/i.test(key))"
+      ]
+    },
+    {
+      "category": "ambiguity",
+      "severity": "high",
+      "title": "Plan is fundamentally too ambiguous to produce grounded tests — generator acknowledges 8 ambiguous requirements",
+      "details": "The generator metadata lists 8 ambiguous requirements including: no specified source module, no function name, no API signature, no integration point, empty clarified decisions, and the plan's own edge cases acknowledge 'critical behavior remains ambiguous'. The plan's only concrete scope item is to 'review and update' an existing test file, but the generated tests do not review or update that file — they create an entirely new test file against invented APIs.",
+      "fix": "Report this plan as requiring clarification before test generation can proceed. The plan must specify: (1) which module contains the warning rendering, (2) what function/API to test, (3) how the warning integrates into CLI output. Without these, no grounded behavioral tests can be written.",
+      "requirement": "Clarified decisions: (none); Edge cases: 'Critical behavior remains ambiguous'"
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Plan scope says to 'review and update' the existing test file but tests ignore it entirely",
+      "details": "The plan's only scope item is: 'Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts'. The generated tests do not import, reference, or build upon this existing file. They create a completely separate test file with fabricated APIs. The existing test file likely contains real imports and patterns that could ground the tests.",
+      "fix": "Read the actual content of the existing test file referenced in the plan scope. Base any new tests on the real modules and functions imported there, rather than inventing `formatPlanningBanner`.",
+      "requirement": "Scope: Review and update existing test file",
+      "evidence": [
+        "outputPath: '__tests__/extensions/currently-while-during-planning-there-is-a-active-planning-w.plan.test.ts' — this is a new file, not the one the plan says to update"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "evidence": [
+        "section: Scope"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: Unconfirmed product changes beyond the requested feature",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "Unconfirmed product changes beyond the requested feature",
+      "evidence": [
+        "section: Out of scope"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: (none)",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "(none)",
+      "evidence": [
+        "section: Clarified decisions"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: The feature behavior is documented in repo-grounded terms.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "The feature behavior is documented in repo-grounded terms.",
+      "evidence": [
+        "section: Acceptance criteria"
+      ]
+    }
+  ],
+  "strengths": [
+    "Thorough documentation of ambiguity in comments and generator metadata",
+    "Uses node:test + node:assert/strict matching repo conventions",
+    "Good coverage of the conceptual requirements (color, borders, title, label, edge cases) if a real API existed",
+    "The ANSI escape code patterns for yellow/red detection are technically sound"
+  ]
+}
