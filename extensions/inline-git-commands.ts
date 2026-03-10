@@ -1,45 +1,40 @@
-type ExecResult = { stdout: string; stderr: string; code: number };
+type ExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
 
 type Ctx = {
 	cwd: string;
-	args?: string[];
-	state?: Record<string, unknown>;
-	exec: (command: string, options?: Record<string, unknown>) => Promise<ExecResult>;
 	ui: {
-		notify: (message: string) => void;
-		warn: (message: string) => void;
-		error: (message: string) => void;
-		confirm: (prompt: string) => Promise<boolean>;
-		select: (prompt: string, choices: Array<{ label: string; value: string }>) => Promise<string>;
+		notify: (message: string, level?: string) => void;
+		confirm: (title: string, message?: string) => Promise<boolean>;
+		select: (prompt: string, choices: string[]) => Promise<string>;
 		input: (prompt: string) => Promise<string>;
-	};
-	pi?: {
-		notify?: (message: string) => void;
-		warn?: (message: string) => void;
-		error?: (message: string) => void;
-		ask?: (prompt: string) => Promise<string>;
 	};
 };
 
 type PiApi = {
-	registerCommand: (name: string, handler: (ctx: Ctx, ...args: unknown[]) => Promise<void>) => void;
+	registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: Ctx) => Promise<void> }) => void;
+	exec: (command: string, args?: string[], options?: Record<string, unknown>) => Promise<ExecResult>;
 };
 
 const MAX_DIFF_LENGTH = 3000;
 
+let _pi: PiApi;
+
+function exec(command: string): Promise<ExecResult> {
+	// Split command into program and args for pi.exec
+	// For simplicity with shell commands, use sh -c
+	return _pi.exec("sh", ["-c", command]);
+}
+
 function notify(ctx: Ctx, message: string) {
-	if (ctx.ui?.notify) ctx.ui.notify(message);
-	else ctx.pi?.notify?.(message);
+	ctx.ui.notify(message, "info");
 }
 
 function warnMsg(ctx: Ctx, message: string) {
-	if (ctx.ui?.warn) ctx.ui.warn(message);
-	else ctx.pi?.warn?.(message);
+	ctx.ui.notify(message, "warning");
 }
 
 function errorMsg(ctx: Ctx, message: string) {
-	if (ctx.ui?.error) ctx.ui.error(message);
-	else ctx.pi?.error?.(message);
+	ctx.ui.notify(message, "error");
 }
 
 function shQuote(s: string): string {
@@ -52,7 +47,7 @@ function trimOutput(output: string, maxLen = MAX_DIFF_LENGTH): string {
 }
 
 async function isDirty(ctx: Ctx): Promise<boolean> {
-	const result = await ctx.exec("git status --porcelain");
+	const result = await exec("git status --porcelain");
 	return result.stdout.trim().length > 0;
 }
 
@@ -61,12 +56,12 @@ async function handleDirtyTree(ctx: Ctx): Promise<boolean> {
 	if (!dirty) return false;
 	const confirmed = await ctx.ui.confirm("Working tree has uncommitted changes. Stash them?");
 	if (!confirmed) return false;
-	await ctx.exec("git stash push");
+	await exec("git stash push");
 	return true;
 }
 
 async function unstash(ctx: Ctx): Promise<boolean> {
-	const result = await ctx.exec("git stash pop");
+	const result = await exec("git stash pop");
 	if (result.code !== 0) {
 		errorMsg(ctx, `Stash pop failed (possible conflict): ${result.stderr}. Your stash is still intact.`);
 		return false;
@@ -76,7 +71,7 @@ async function unstash(ctx: Ctx): Promise<boolean> {
 }
 
 async function ensureGhAuthenticated(ctx: Ctx): Promise<boolean> {
-	const result = await ctx.exec("gh auth status");
+	const result = await exec("gh auth status");
 	if (result.code !== 0) {
 		errorMsg(ctx, "GitHub CLI is not authenticated. Run 'gh auth login' first.");
 		return false;
@@ -85,22 +80,22 @@ async function ensureGhAuthenticated(ctx: Ctx): Promise<boolean> {
 }
 
 async function getCurrentBranch(ctx: Ctx): Promise<string> {
-	const result = await ctx.exec("git rev-parse --abbrev-ref HEAD");
+	const result = await exec("git rev-parse --abbrev-ref HEAD");
 	return result.stdout.trim();
 }
 
 // --- Command handlers ---
 
 async function gitStatus(ctx: Ctx) {
-	const result = await ctx.exec("git status --short");
+	const result = await exec("git status --short");
 	const output = result.stdout.trim() || "Nothing to report";
 	notify(ctx, output);
 }
 
 async function gitDiff(ctx: Ctx, filePath?: string) {
 	const pathArg = filePath ? ` -- ${shQuote(String(filePath))}` : "";
-	const result = await ctx.exec(`git diff${pathArg}`);
-	const stagedResult = await ctx.exec(`git diff --staged${pathArg}`);
+	const result = await exec(`git diff${pathArg}`);
+	const stagedResult = await exec(`git diff --staged${pathArg}`);
 	const combined = [result.stdout, stagedResult.stdout].filter(Boolean).join("\n");
 	const output = combined.trim() || "No diff output";
 	notify(ctx, trimOutput(output));
@@ -113,7 +108,7 @@ async function gitCheckout(ctx: Ctx, branchArg?: string) {
 
 	if (!branch) {
 		// Interactive branch picker
-		const branchResult = await ctx.exec("git branch -a");
+		const branchResult = await exec("git branch -a");
 		const rawBranches = branchResult.stdout
 			.split("\n")
 			.map((b) => b.replace(/^\*?\s+/, "").trim())
@@ -121,12 +116,12 @@ async function gitCheckout(ctx: Ctx, branchArg?: string) {
 
 		// Strip remotes/origin/ prefixes and deduplicate
 		const seen = new Set<string>();
-		const choices: Array<{ label: string; value: string }> = [];
+		const choices: string[] = [];
 		for (const raw of rawBranches) {
 			const cleaned = raw.replace(/^remotes\/origin\//, "");
 			if (!seen.has(cleaned)) {
 				seen.add(cleaned);
-				choices.push({ label: cleaned, value: cleaned });
+				choices.push(cleaned);
 			}
 		}
 
@@ -137,7 +132,7 @@ async function gitCheckout(ctx: Ctx, branchArg?: string) {
 
 	const stashed = await handleDirtyTree(ctx);
 
-	const result = await ctx.exec(`git checkout ${shQuote(targetBranch)}`);
+	const result = await exec(`git checkout ${shQuote(targetBranch)}`);
 	if (result.code !== 0) {
 		errorMsg(ctx, `Checkout failed: ${result.stderr}`);
 		if (stashed) await unstash(ctx);
@@ -158,7 +153,7 @@ async function gitCreateBranch(ctx: Ctx, slug?: string) {
 		return;
 	}
 
-	const result = await ctx.exec(`git checkout -b ${shQuote(branchName)}`);
+	const result = await exec(`git checkout -b ${shQuote(branchName)}`);
 	if (result.code !== 0) {
 		errorMsg(ctx, `Failed to create branch: ${result.stderr}`);
 		return;
@@ -172,7 +167,7 @@ async function gitRemoteMain(ctx: Ctx) {
 	const currentBranch = await getCurrentBranch(ctx);
 
 	if (currentBranch !== "main") {
-		const result = await ctx.exec("git checkout main");
+		const result = await exec("git checkout main");
 		if (result.code !== 0) {
 			errorMsg(ctx, `Failed to checkout main: ${result.stderr}`);
 			if (stashed) await unstash(ctx);
@@ -180,7 +175,7 @@ async function gitRemoteMain(ctx: Ctx) {
 		}
 	}
 
-	const pullResult = await ctx.exec("git pull origin main");
+	const pullResult = await exec("git pull origin main");
 	if (pullResult.code !== 0) {
 		errorMsg(ctx, `Failed to pull: ${pullResult.stderr}`);
 	} else {
@@ -205,8 +200,8 @@ async function gitCommit(ctx: Ctx, messageArg?: string) {
 		message = await ctx.ui.input("Enter commit message:");
 	}
 
-	await ctx.exec("git add -A");
-	const result = await ctx.exec(`git commit -m ${shQuote(message)}`);
+	await exec("git add -A");
+	const result = await exec(`git commit -m ${shQuote(message)}`);
 	if (result.code !== 0) {
 		errorMsg(ctx, `Commit failed: ${result.stderr}`);
 		return;
@@ -224,15 +219,15 @@ async function gitPr(ctx: Ctx) {
 	}
 
 	// Check for upstream, push with -u if needed
-	const upstreamCheck = await ctx.exec("git rev-parse --abbrev-ref --symbolic-full-name @{u}");
+	const upstreamCheck = await exec("git rev-parse --abbrev-ref --symbolic-full-name @{u}");
 	if (upstreamCheck.code !== 0) {
-		await ctx.exec(`git push -u origin ${shQuote(branch)}`);
+		await exec(`git push -u origin ${shQuote(branch)}`);
 	} else {
-		await ctx.exec("git push");
+		await exec("git push");
 	}
 
 	// Check if PR already exists
-	const prView = await ctx.exec("gh pr view");
+	const prView = await exec("gh pr view");
 	if (prView.code === 0) {
 		// PR already exists
 		const urlMatch = prView.stdout.match(/url:\s*(\S+)/);
@@ -242,7 +237,7 @@ async function gitPr(ctx: Ctx) {
 	}
 
 	// Create new PR
-	const createResult = await ctx.exec(`gh pr create --base main --head ${shQuote(branch)} --fill`);
+	const createResult = await exec(`gh pr create --base main --head ${shQuote(branch)} --fill`);
 	if (createResult.code !== 0) {
 		errorMsg(ctx, `Failed to create PR: ${createResult.stderr}`);
 		return;
@@ -254,9 +249,9 @@ async function gitPrUpdate(ctx: Ctx) {
 	if (!(await ensureGhAuthenticated(ctx))) return;
 
 	const branch = await getCurrentBranch(ctx);
-	await ctx.exec("git push");
+	await exec("git push");
 
-	const prView = await ctx.exec("gh pr view");
+	const prView = await exec("gh pr view");
 	if (prView.code !== 0) {
 		warnMsg(ctx, "No existing PR found for this branch. Use /git-pr to create one.");
 		return;
@@ -270,19 +265,21 @@ async function gitPrUpdate(ctx: Ctx) {
 // --- Extension registration ---
 
 export default function inlineGitExtension(pi: PiApi) {
-	const commands: Array<{ name: string; handler: (ctx: Ctx, ...args: unknown[]) => Promise<void> }> = [
+	_pi = pi;
+
+	const commands: Array<{ name: string; handler: (ctx: Ctx, args?: string) => Promise<void> }> = [
 		{ name: "git-status", handler: gitStatus },
-		{ name: "git-diff", handler: gitDiff as (ctx: Ctx, ...args: unknown[]) => Promise<void> },
-		{ name: "git-checkout", handler: gitCheckout as (ctx: Ctx, ...args: unknown[]) => Promise<void> },
-		{ name: "git-create-branch", handler: gitCreateBranch as (ctx: Ctx, ...args: unknown[]) => Promise<void> },
+		{ name: "git-diff", handler: gitDiff },
+		{ name: "git-checkout", handler: gitCheckout },
+		{ name: "git-create-branch", handler: gitCreateBranch },
 		{ name: "git-remote-main", handler: gitRemoteMain },
-		{ name: "git-commit", handler: gitCommit as (ctx: Ctx, ...args: unknown[]) => Promise<void> },
+		{ name: "git-commit", handler: gitCommit },
 		{ name: "git-pr", handler: gitPr },
 		{ name: "git-pr-update", handler: gitPrUpdate },
 	];
 
 	for (const cmd of commands) {
-		pi?.registerCommand?.(cmd.name, {
+		pi.registerCommand(cmd.name, {
 			description: `Git command /${cmd.name}`,
 			handler: async (args: string, ctx: Ctx) => {
 				await cmd.handler(ctx, args?.trim());

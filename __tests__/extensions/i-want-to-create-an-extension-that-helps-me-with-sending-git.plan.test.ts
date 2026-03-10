@@ -6,8 +6,8 @@ import inlineGitExtension from "../../extensions/inline-git-commands.ts";
 
 // ---------- helpers ----------
 
-type ExecResult = { stdout: string; stderr: string; code: number };
-type ExecCall = { command: string; options?: Record<string, unknown> };
+type ExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
+type ExecCall = { command: string; args?: string[]; options?: Record<string, unknown> };
 type Notice = { level: string; message: string };
 
 function ok(stdout = "", code = 0): ExecResult {
@@ -17,6 +17,15 @@ function fail(stderr = "", code = 1): ExecResult {
 	return { stdout: "", stderr, code };
 }
 
+/**
+ * Creates a test context matching the current Pi extension API.
+ *
+ * Registration pattern (matches worktree.ts and inline-git-commands.ts):
+ *   export default function extension(pi: PiApi) { pi.registerCommand(...) }
+ *
+ * The extension uses pi.exec("sh", ["-c", "<command>"]) for shell execution,
+ * and ctx.ui.notify(message, level) for all notification levels.
+ */
 function makeCtx(overrides: Record<string, unknown> = {}) {
 	const execCalls: ExecCall[] = [];
 	const notices: Notice[] = [];
@@ -27,90 +36,77 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
 
 	const ctx = {
 		cwd: "/repo",
-		args: [] as string[],
-		state: {} as Record<string, unknown>,
 		execCalls,
 		notices,
 		execResponses,
 		set confirmResult(v: boolean) { confirmResult = v; },
 		set selectResult(v: string) { selectResult = v; },
 		set inputResult(v: string) { inputResult = v; },
-		exec: async (command: string, options?: Record<string, unknown>): Promise<ExecResult> => {
-			execCalls.push({ command, options });
-			for (const [pattern, result] of execResponses.entries()) {
-				if (command.includes(pattern)) return result;
-			}
-			return ok();
-		},
 		ui: {
-			notify: (message: string) => { notices.push({ level: "info", message }); },
-			warn: (message: string) => { notices.push({ level: "warn", message }); },
-			error: (message: string) => { notices.push({ level: "error", message }); },
-			confirm: async (_prompt: string) => confirmResult,
-			select: async (_prompt: string, choices: Array<{ label: string; value: string }>) => {
+			notify: (message: string, level?: string) => { notices.push({ level: level ?? "info", message }); },
+			confirm: async (_title: string, _message?: string) => confirmResult,
+			select: async (_prompt: string, choices: string[]) => {
 				if (selectResult) return selectResult;
-				return choices[0]?.value ?? "";
+				return choices[0] ?? "";
 			},
 			input: async (_prompt: string) => inputResult ?? "default message",
-		},
-		pi: {
-			notify: (message: string) => { notices.push({ level: "info", message }); },
-			warn: (message: string) => { notices.push({ level: "warn", message }); },
-			error: (message: string) => { notices.push({ level: "error", message }); },
-			ask: async (_prompt: string) => inputResult ?? "default message",
 		},
 		...overrides,
 	};
 	return ctx;
 }
 
-function findCommand(ext: Record<string, unknown>, name: string): ((...args: unknown[]) => Promise<unknown>) | undefined {
-	// The extension should expose commands — try common patterns
-	const commands = (ext as any).commands ?? (ext as any).default?.commands;
-	if (Array.isArray(commands)) {
-		const found = commands.find((c: any) => c.name === name || c.command === name);
-		return found?.handler ?? found?.run ?? found?.execute;
-	}
-	if (commands && typeof commands === "object") {
-		const entry = commands[name];
-		if (typeof entry === "function") return entry;
-		return entry?.handler ?? entry?.run ?? entry?.execute;
-	}
-	return undefined;
-}
+/**
+ * Collects registered commands by calling the extension with a mock PiApi.
+ *
+ * The extension stores pi globally and uses pi.exec("sh", ["-c", cmd]) for
+ * all shell execution. The mock pi.exec intercepts these calls, extracts the
+ * actual shell command from the ["-c", cmd] args pattern, and matches against
+ * execResponses set on the context.
+ *
+ * Returns a map of command name -> handler(args, ctx).
+ */
+function collectRegisteredCommands(
+	ext: unknown,
+	ctxForExec?: ReturnType<typeof makeCtx>,
+): Map<string, (args: string, ctx: ReturnType<typeof makeCtx>) => Promise<unknown>> {
+	const map = new Map<string, (args: string, ctx: ReturnType<typeof makeCtx>) => Promise<unknown>>();
 
-function getRegisteredCommandNames(ext: Record<string, unknown>): string[] {
-	const commands = (ext as any).commands ?? (ext as any).default?.commands;
-	if (Array.isArray(commands)) {
-		return commands.map((c: any) => c.name ?? c.command).filter(Boolean);
-	}
-	if (commands && typeof commands === "object") {
-		return Object.keys(commands);
-	}
-	return [];
-}
-
-// If the extension uses pi.registerCommand pattern (like worktree.ts), we need a different approach
-function collectRegisteredCommands(ext: unknown): Map<string, (...args: unknown[]) => Promise<unknown>> {
-	const map = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-	const registerCommand = (name: string, handler: (...args: unknown[]) => Promise<unknown>) => {
-		map.set(name, handler);
-	};
 	const mockPi = {
-		registerCommand,
+		registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: any) => Promise<void> }) => {
+			map.set(name, options.handler);
+		},
+		exec: async (command: string, args?: string[], options?: Record<string, unknown>): Promise<ExecResult> => {
+			// The extension calls pi.exec("sh", ["-c", "actual command"])
+			const shellCommand = (args && args.length >= 2 && args[0] === "-c") ? args[1] : `${command} ${(args ?? []).join(" ")}`.trim();
+
+			if (ctxForExec) {
+				ctxForExec.execCalls.push({ command: shellCommand, args, options });
+				for (const [pattern, result] of ctxForExec.execResponses.entries()) {
+					if (shellCommand.includes(pattern)) return result;
+				}
+			}
+			return ok();
+		},
 	};
 
-	// Extension might be a function that accepts pi, or an object with an init/setup method
 	if (typeof ext === "function") {
 		try { (ext as any)(mockPi); } catch { /* ignore */ }
-	} else if (ext && typeof (ext as any).init === "function") {
-		try { (ext as any).init(mockPi); } catch { /* ignore */ }
-	} else if (ext && typeof (ext as any).setup === "function") {
-		try { (ext as any).setup(mockPi); } catch { /* ignore */ }
 	} else if (ext && typeof (ext as any).default === "function") {
 		try { (ext as any).default(mockPi); } catch { /* ignore */ }
 	}
 	return map;
+}
+
+/**
+ * Helper to register commands with a specific context wired for exec responses.
+ * Returns the handler for a specific command.
+ */
+function getHandler(commandName: string, ctx: ReturnType<typeof makeCtx>) {
+	const commands = collectRegisteredCommands(inlineGitExtension, ctx);
+	const handler = commands.get(commandName);
+	assert.ok(handler, `${commandName} command handler must exist`);
+	return handler;
 }
 
 // ---------- tests ----------
@@ -129,9 +125,6 @@ test("extension module exports a valid extension object or function", () => {
 test("extension registers individual git slash commands, not a single /git dispatcher", () => {
 	const commands = collectRegisteredCommands(inlineGitExtension);
 	const names = [...commands.keys()];
-	// Also try object-style
-	const objNames = getRegisteredCommandNames(inlineGitExtension as Record<string, unknown>);
-	const allNames = [...new Set([...names, ...objNames])];
 
 	const expectedCommands = [
 		"git-status",
@@ -146,22 +139,19 @@ test("extension registers individual git slash commands, not a single /git dispa
 
 	for (const cmd of expectedCommands) {
 		assert.ok(
-			allNames.some((n) => n === cmd || n === `/${cmd}` || n.endsWith(cmd)),
-			`expected command "${cmd}" to be registered, found: [${allNames.join(", ")}]`,
+			names.some((n) => n === cmd || n === `/${cmd}` || n.endsWith(cmd)),
+			`expected command "${cmd}" to be registered, found: [${names.join(", ")}]`,
 		);
 	}
 });
 
-// Requirement 3: /git-status shows git status --short and notifies result
+// Requirement 3 / Scope: `/git-status` — show `git status --short`, notify result
 test("/git-status runs 'git status --short' and notifies result", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("git status", ok(" M src/index.ts\n?? newfile.ts"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-status") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-status");
-	assert.ok(handler, "git-status command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-status", ctx);
+	await handler("", ctx);
 
 	const statusCall = ctx.execCalls.find((c) => c.command.includes("git status"));
 	assert.ok(statusCall, "must execute git status");
@@ -177,11 +167,8 @@ test("/git-diff shows truncated diff output (staged + unstaged)", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("git diff", ok(longDiff));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-diff") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-diff");
-	assert.ok(handler, "git-diff command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-diff", ctx);
+	await handler("", ctx);
 
 	const diffCall = ctx.execCalls.find((c) => c.command.includes("git diff"));
 	assert.ok(diffCall, "must execute git diff");
@@ -194,45 +181,35 @@ test("/git-diff shows truncated diff output (staged + unstaged)", async () => {
 // Requirement 4: /git-diff with optional path argument
 test("/git-diff accepts optional path argument", async () => {
 	const ctx = makeCtx();
-	ctx.args = ["src/index.ts"];
 	ctx.execResponses.set("git diff", ok("diff output for src/index.ts"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-diff") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-diff");
-	assert.ok(handler, "git-diff command handler must exist");
-
-	await handler(ctx, "src/index.ts");
+	const handler = getHandler("git-diff", ctx);
+	await handler("src/index.ts", ctx);
 
 	const diffCall = ctx.execCalls.find((c) => c.command.includes("git diff") && c.command.includes("src/index.ts"));
 	assert.ok(diffCall, "must execute git diff with the specified path");
 });
 
-// Requirement 5 / 25: /git-checkout without arguments shows interactive branch picker
+// Requirement 5 / 25 / Scope: `/git-checkout <branch>` — switch branch; interactive picker via `ctx.ui.select()` when no argument given; prompt to stash on dirty tree
 test("/git-checkout without arguments shows an interactive branch picker via ctx.ui.select()", async () => {
 	let selectCalled = false;
 	const ctx = makeCtx();
-	ctx.args = [];
 	ctx.execResponses.set("git branch -a", ok("  main\n  feature/foo\n  remotes/origin/feature/bar\n"));
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git checkout", ok("Switched to branch 'feature/foo'"));
 
-	const origSelect = ctx.ui.select;
-	ctx.ui.select = async (prompt: string, choices: Array<{ label: string; value: string }>) => {
+	ctx.ui.select = async (prompt: string, choices: string[]) => {
 		selectCalled = true;
 		// Verify remotes/origin/ prefix is stripped
-		const labels = choices.map((c) => c.label);
 		assert.ok(
-			!labels.some((l) => l.includes("remotes/origin/")),
+			!choices.some((c) => c.includes("remotes/origin/")),
 			"branch picker should strip remotes/origin/ prefixes",
 		);
 		return "feature/foo";
 	};
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-checkout") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-checkout");
-	assert.ok(handler, "git-checkout command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-checkout", ctx);
+	await handler("", ctx);
 
 	assert.ok(selectCalled, "must call ctx.ui.select() for branch picking when no argument given");
 });
@@ -240,15 +217,11 @@ test("/git-checkout without arguments shows an interactive branch picker via ctx
 // Requirement 5: /git-checkout with branch argument switches directly
 test("/git-checkout with branch argument switches branch directly", async () => {
 	const ctx = makeCtx();
-	ctx.args = ["feature/foo"];
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git checkout", ok("Switched to branch 'feature/foo'"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-checkout") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-checkout");
-	assert.ok(handler, "git-checkout command handler must exist");
-
-	await handler(ctx, "feature/foo");
+	const handler = getHandler("git-checkout", ctx);
+	await handler("feature/foo", ctx);
 
 	const checkoutCall = ctx.execCalls.find((c) => c.command.includes("git checkout") && c.command.includes("feature/foo"));
 	assert.ok(checkoutCall, "must execute git checkout with the specified branch");
@@ -258,22 +231,18 @@ test("/git-checkout with branch argument switches branch directly", async () => 
 test("/git-checkout on dirty tree prompts to stash, auto-stashes if confirmed, and unstashes after checkout", async () => {
 	let confirmCalled = false;
 	const ctx = makeCtx();
-	ctx.args = ["feature/foo"];
 	ctx.execResponses.set("git status --porcelain", ok(" M dirty-file.ts\n"));
 	ctx.execResponses.set("git stash", ok("Saved working directory"));
 	ctx.execResponses.set("git checkout", ok("Switched to branch 'feature/foo'"));
 	ctx.execResponses.set("git stash pop", ok("Applied stash"));
 
-	ctx.ui.confirm = async (_prompt: string) => {
+	ctx.ui.confirm = async (_title: string, _message?: string) => {
 		confirmCalled = true;
 		return true;
 	};
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-checkout") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-checkout");
-	assert.ok(handler, "git-checkout command handler must exist");
-
-	await handler(ctx, "feature/foo");
+	const handler = getHandler("git-checkout", ctx);
+	await handler("feature/foo", ctx);
 
 	assert.ok(confirmCalled, "must prompt user via ctx.ui.confirm() for dirty tree");
 	const stashCall = ctx.execCalls.find((c) => c.command.includes("git stash") && !c.command.includes("pop"));
@@ -287,11 +256,8 @@ test("/git-create-branch creates and checks out a new branch", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("git checkout -b", ok("Switched to a new branch 'feature/new-thing'"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-create-branch") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-create-branch");
-	assert.ok(handler, "git-create-branch command handler must exist");
-
-	await handler(ctx, "feature/new-thing");
+	const handler = getHandler("git-create-branch", ctx);
+	await handler("feature/new-thing", ctx);
 
 	const createCall = ctx.execCalls.find((c) => c.command.includes("git checkout -b") && c.command.includes("feature/new-thing"));
 	assert.ok(createCall, "must execute git checkout -b with the branch slug");
@@ -306,11 +272,8 @@ test("/git-remote-main checks out main and pulls from origin", async () => {
 	ctx.execResponses.set("git checkout main", ok("Switched to branch 'main'"));
 	ctx.execResponses.set("git pull origin main", ok("Already up to date."));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-remote-main") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-remote-main");
-	assert.ok(handler, "git-remote-main command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-remote-main", ctx);
+	await handler("", ctx);
 
 	const checkoutMain = ctx.execCalls.find((c) => c.command.includes("git checkout main"));
 	assert.ok(checkoutMain, "must checkout main");
@@ -331,11 +294,8 @@ test("/git-remote-main prompts to stash on dirty working tree", async () => {
 
 	ctx.ui.confirm = async () => { confirmCalled = true; return true; };
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-remote-main") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-remote-main");
-	assert.ok(handler, "git-remote-main command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-remote-main", ctx);
+	await handler("", ctx);
 
 	assert.ok(confirmCalled, "must prompt via ctx.ui.confirm() on dirty tree");
 });
@@ -347,11 +307,8 @@ test("/git-remote-main when already on main skips checkout and just pulls", asyn
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("main"));
 	ctx.execResponses.set("git pull origin main", ok("Already up to date."));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-remote-main") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-remote-main");
-	assert.ok(handler, "git-remote-main command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-remote-main", ctx);
+	await handler("", ctx);
 
 	const checkoutCall = ctx.execCalls.find((c) => c.command.includes("git checkout main"));
 	assert.ok(!checkoutCall, "should NOT checkout main when already on main");
@@ -366,11 +323,8 @@ test("/git-commit stages all changes (git add -A) and commits with provided mess
 	ctx.execResponses.set("git add -A", ok(""));
 	ctx.execResponses.set("git commit", ok("[main abc1234] my commit message"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-commit") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-commit");
-	assert.ok(handler, "git-commit command handler must exist");
-
-	await handler(ctx, "my commit message");
+	const handler = getHandler("git-commit", ctx);
+	await handler("my commit message", ctx);
 
 	const addCall = ctx.execCalls.find((c) => c.command.includes("git add -A"));
 	assert.ok(addCall, "must stage all changes with git add -A");
@@ -379,10 +333,10 @@ test("/git-commit stages all changes (git add -A) and commits with provided mess
 });
 
 // Requirement 27: /git-commit without message prompts interactively
+// Finding 2 fix: also verify the prompted message is used in the commit command
 test("/git-commit without a message argument prompts for one interactively", async () => {
 	let inputCalled = false;
 	const ctx = makeCtx();
-	ctx.args = [];
 	ctx.execResponses.set("git status --porcelain", ok(" M file.ts\n"));
 	ctx.execResponses.set("git add -A", ok(""));
 	ctx.execResponses.set("git commit", ok("[main abc1234] prompted message"));
@@ -392,13 +346,14 @@ test("/git-commit without a message argument prompts for one interactively", asy
 		return "prompted message";
 	};
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-commit") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-commit");
-	assert.ok(handler, "git-commit command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-commit", ctx);
+	await handler("", ctx);
 
 	assert.ok(inputCalled, "must prompt for commit message via ctx.ui.input() when no argument given");
+	assert.ok(
+		ctx.execCalls.find((c) => c.command.includes("git commit") && c.command.includes("prompted message")),
+		"must use the interactively provided message in the commit",
+	);
 });
 
 // Requirement 33: /git-commit with no changes notifies "nothing to commit"
@@ -406,11 +361,8 @@ test("/git-commit with no changes notifies nothing to commit", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("git status --porcelain", ok(""));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-commit") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-commit");
-	assert.ok(handler, "git-commit command handler must exist");
-
-	await handler(ctx, "some message");
+	const handler = getHandler("git-commit", ctx);
+	await handler("some message", ctx);
 
 	assert.ok(
 		ctx.notices.some((n) => /nothing to commit/i.test(n.message)),
@@ -425,13 +377,11 @@ test("/git-pr creates a new PR via gh pr create against main", async () => {
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("feature/cool"));
 	ctx.execResponses.set("gh pr view", fail("no pull requests found", 1));
 	ctx.execResponses.set("git push", ok(""));
+	ctx.execResponses.set("git rev-parse --abbrev-ref --symbolic-full-name @{u}", fail("no upstream", 128));
 	ctx.execResponses.set("gh pr create", ok("https://github.com/org/repo/pull/42"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-pr") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-pr");
-	assert.ok(handler, "git-pr command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-pr", ctx);
+	await handler("", ctx);
 
 	const prCreate = ctx.execCalls.find((c) => c.command.includes("gh pr create"));
 	assert.ok(prCreate, "must call gh pr create");
@@ -448,12 +398,10 @@ test("/git-pr detects existing PR and updates instead of creating", async () => 
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("feature/cool"));
 	ctx.execResponses.set("gh pr view", ok("title:\tMy PR\nurl:\thttps://github.com/org/repo/pull/42"));
 	ctx.execResponses.set("git push", ok(""));
+	ctx.execResponses.set("git rev-parse --abbrev-ref --symbolic-full-name @{u}", ok("origin/feature/cool"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-pr") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-pr");
-	assert.ok(handler, "git-pr command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-pr", ctx);
+	await handler("", ctx);
 
 	const prCreate = ctx.execCalls.find((c) => c.command.includes("gh pr create"));
 	assert.ok(!prCreate, "must NOT call gh pr create when PR already exists");
@@ -469,14 +417,11 @@ test("/git-pr on main branch refuses with a helpful message", async () => {
 	ctx.execResponses.set("gh auth status", ok("Logged in"));
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("main"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-pr") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-pr");
-	assert.ok(handler, "git-pr command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-pr", ctx);
+	await handler("", ctx);
 
 	assert.ok(
-		ctx.notices.some((n) => /main/i.test(n.message) && (n.level === "warn" || n.level === "error")),
+		ctx.notices.some((n) => /main/i.test(n.message) && (n.level === "warning" || n.level === "error")),
 		"must refuse and notify when on main branch",
 	);
 	const prCreate = ctx.execCalls.find((c) => c.command.includes("gh pr create"));
@@ -494,17 +439,14 @@ test("/git-pr pushes with -u origin <branch> when branch has no upstream", async
 	ctx.execResponses.set("git push", ok(""));
 	ctx.execResponses.set("gh pr create", ok("https://github.com/org/repo/pull/99"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-pr") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-pr");
-	assert.ok(handler, "git-pr command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-pr", ctx);
+	await handler("", ctx);
 
 	const pushUpstream = ctx.execCalls.find((c) => c.command.includes("git push") && c.command.includes("-u") && c.command.includes("origin"));
 	assert.ok(pushUpstream, "must push with -u origin <branch> when no upstream exists");
 });
 
-// Requirement 10 / 28: /git-pr-update pushes and reports PR URL
+// Requirement 10 / 28 / Scope: `/git-pr-update` — push current branch, update existing PR (or notify if none exists)
 test("/git-pr-update pushes current branch and reports existing PR URL", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("gh auth status", ok("Logged in"));
@@ -512,11 +454,8 @@ test("/git-pr-update pushes current branch and reports existing PR URL", async (
 	ctx.execResponses.set("git push", ok(""));
 	ctx.execResponses.set("gh pr view", ok("title:\tMy PR\nurl:\thttps://github.com/org/repo/pull/55"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-pr-update") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-pr-update");
-	assert.ok(handler, "git-pr-update command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-pr-update", ctx);
+	await handler("", ctx);
 
 	const pushCall = ctx.execCalls.find((c) => c.command.includes("git push"));
 	assert.ok(pushCall, "must push current branch");
@@ -534,14 +473,11 @@ test("/git-pr-update notifies if no existing PR is found", async () => {
 	ctx.execResponses.set("git push", ok(""));
 	ctx.execResponses.set("gh pr view", fail("no pull requests found", 1));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-pr-update") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-pr-update");
-	assert.ok(handler, "git-pr-update command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-pr-update", ctx);
+	await handler("", ctx);
 
 	assert.ok(
-		ctx.notices.some((n) => /no.*(pr|pull request)/i.test(n.message) || n.level === "warn" || n.level === "error"),
+		ctx.notices.some((n) => /no.*(pr|pull request)/i.test(n.message) || n.level === "warning" || n.level === "error"),
 		"must notify that no existing PR was found",
 	);
 });
@@ -551,18 +487,15 @@ test("/git-pr checks gh authentication before proceeding", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("gh auth status", fail("not logged in", 1));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-pr") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-pr");
-	assert.ok(handler, "git-pr command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-pr", ctx);
+	await handler("", ctx);
 
 	const ghAuth = ctx.execCalls.find((c) => c.command.includes("gh auth"));
 	assert.ok(ghAuth, "must check gh auth status");
 	const prCreate = ctx.execCalls.find((c) => c.command.includes("gh pr create"));
 	assert.ok(!prCreate, "must NOT proceed with PR creation if gh is not authenticated");
 	assert.ok(
-		ctx.notices.some((n) => n.level === "error" || n.level === "warn"),
+		ctx.notices.some((n) => n.level === "error" || n.level === "warning"),
 		"must notify error about gh authentication",
 	);
 });
@@ -570,18 +503,15 @@ test("/git-pr checks gh authentication before proceeding", async () => {
 // Requirement 29: All commands notify success/failure via ctx.ui.notify()
 test("all commands produce at least one notification on success", async () => {
 	const commandsToTest = [
-		{ name: "git-status", args: [] as string[], setup: (ctx: ReturnType<typeof makeCtx>) => { ctx.execResponses.set("git status", ok("nothing to commit")); } },
-		{ name: "git-create-branch", args: ["test-branch"], setup: (ctx: ReturnType<typeof makeCtx>) => { ctx.execResponses.set("git checkout -b", ok("Switched")); } },
+		{ name: "git-status", args: "", setup: (ctx: ReturnType<typeof makeCtx>) => { ctx.execResponses.set("git status", ok("nothing to commit")); } },
+		{ name: "git-create-branch", args: "test-branch", setup: (ctx: ReturnType<typeof makeCtx>) => { ctx.execResponses.set("git checkout -b", ok("Switched")); } },
 	];
-
-	const commands = collectRegisteredCommands(inlineGitExtension);
 
 	for (const { name, args, setup } of commandsToTest) {
 		const ctx = makeCtx();
 		setup(ctx);
-		const handler = commands.get(name) ?? findCommand(inlineGitExtension as Record<string, unknown>, name);
-		assert.ok(handler, `${name} command handler must exist`);
-		await handler(ctx, ...args);
+		const handler = getHandler(name, ctx);
+		await handler(args, ctx);
 		assert.ok(ctx.notices.length > 0, `${name} must produce at least one notification`);
 	}
 });
@@ -592,11 +522,8 @@ test("/git-checkout on a remote-only branch auto-tracks via git checkout <branch
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git checkout", ok("Switched to a new branch 'remote-only' tracking 'origin/remote-only'"));
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-checkout") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-checkout");
-	assert.ok(handler, "git-checkout command handler must exist");
-
-	await handler(ctx, "remote-only");
+	const handler = getHandler("git-checkout", ctx);
+	await handler("remote-only", ctx);
 
 	const checkoutCall = ctx.execCalls.find((c) => c.command.includes("git checkout") && c.command.includes("remote-only"));
 	assert.ok(checkoutCall, "must execute git checkout for remote-only branch (git handles auto-tracking)");
@@ -605,7 +532,6 @@ test("/git-checkout on a remote-only branch auto-tracks via git checkout <branch
 // Requirement 36: Stash pop conflict after checkout notifies error, leaves stash intact
 test("stash pop conflict after checkout notifies error and leaves stash intact", async () => {
 	const ctx = makeCtx();
-	ctx.args = ["feature/conflict"];
 	ctx.execResponses.set("git status --porcelain", ok(" M conflicting.ts\n"));
 	ctx.execResponses.set("git stash", ok("Saved"));
 	ctx.execResponses.set("git checkout", ok("Switched"));
@@ -613,14 +539,11 @@ test("stash pop conflict after checkout notifies error and leaves stash intact",
 
 	ctx.ui.confirm = async () => true;
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-checkout") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-checkout");
-	assert.ok(handler, "git-checkout command handler must exist");
-
-	await handler(ctx, "feature/conflict");
+	const handler = getHandler("git-checkout", ctx);
+	await handler("feature/conflict", ctx);
 
 	assert.ok(
-		ctx.notices.some((n) => n.level === "error" || n.level === "warn" || /conflict|stash/i.test(n.message)),
+		ctx.notices.some((n) => n.level === "error" || n.level === "warning" || /conflict|stash/i.test(n.message)),
 		"must notify about stash pop conflict",
 	);
 	// Must not call git stash drop — stash should remain
@@ -630,29 +553,32 @@ test("stash pop conflict after checkout notifies error and leaves stash intact",
 
 // Requirement 17: Branch picker strips remotes/origin/ prefixes for display
 test("branch picker strips remotes/origin/ prefixes and deduplicates branches", async () => {
-	let receivedChoices: Array<{ label: string; value: string }> = [];
+	let receivedChoices: string[] = [];
 	const ctx = makeCtx();
-	ctx.args = [];
 	ctx.execResponses.set("git branch -a", ok("  main\n  feature/x\n  remotes/origin/main\n  remotes/origin/feature/x\n  remotes/origin/feature/remote-only\n"));
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git checkout", ok("Switched"));
 
-	ctx.ui.select = async (_prompt: string, choices: Array<{ label: string; value: string }>) => {
+	ctx.ui.select = async (_prompt: string, choices: string[]) => {
 		receivedChoices = choices;
-		return choices[0]?.value ?? "main";
+		return choices[0] ?? "main";
 	};
 
-	const commands = collectRegisteredCommands(inlineGitExtension);
-	const handler = commands.get("git-checkout") ?? findCommand(inlineGitExtension as Record<string, unknown>, "git-checkout");
-	assert.ok(handler, "git-checkout command handler must exist");
-
-	await handler(ctx);
+	const handler = getHandler("git-checkout", ctx);
+	await handler("", ctx);
 
 	assert.ok(receivedChoices.length > 0, "must provide choices to select");
 	for (const choice of receivedChoices) {
 		assert.ok(
-			!choice.label.includes("remotes/origin/"),
-			`branch label should not contain 'remotes/origin/' prefix, got: ${choice.label}`,
+			!choice.includes("remotes/origin/"),
+			`branch label should not contain 'remotes/origin/' prefix, got: ${choice}`,
 		);
 	}
+	// Verify deduplication: main and feature/x appear only once each
+	const mainCount = receivedChoices.filter((c) => c === "main").length;
+	assert.ok(mainCount === 1, `'main' should appear exactly once, got ${mainCount}`);
+	const featureXCount = receivedChoices.filter((c) => c === "feature/x").length;
+	assert.ok(featureXCount === 1, `'feature/x' should appear exactly once, got ${featureXCount}`);
+	// remote-only should be present
+	assert.ok(receivedChoices.includes("feature/remote-only"), "remote-only branch should be included after stripping prefix");
 });
