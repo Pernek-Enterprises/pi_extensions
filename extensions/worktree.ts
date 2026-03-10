@@ -1032,7 +1032,7 @@ const commandHandlers: Record<string, (ctx: Ctx, ...args: string[]) => Promise<u
 	"worktree-start": async (ctx: Ctx, slug?: string) => await handleWorktreeStart(ctx, slug),
 	"worktree-pr": async (ctx: Ctx) => await handleWorktreePr(ctx),
 	"worktree-main": async (ctx: Ctx) => await handleWorktreeMain(ctx),
-	"worktree-cleanup": async (ctx: Ctx, slug?: string) => await handleWorktreeCleanupInteractive(ctx, slug),
+	"worktree-cleanup": async (ctx: Ctx, slug?: string) => await handleWorktreeCleanup(ctx, slug),
 };
 
 export default function worktreeExtension(pi: PiApi) {
