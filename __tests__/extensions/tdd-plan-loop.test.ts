@@ -87,6 +87,7 @@ test("buildLoopIterationPaths stages iteration artifacts under .pi/generated-tdd
 	assert.equal(paths.coveragePath, "/repo/.pi/generated-tdd/feature-plan/iteration-2.coverage.json");
 	assert.equal(paths.findingsPath, "/repo/.pi/generated-tdd/feature-plan/iteration-2.findings.json");
 	assert.equal(paths.findingsSummaryPath, "/repo/.pi/generated-tdd/feature-plan/iteration-2.findings.md");
+	assert.equal(paths.fixHandoffPath, "/repo/.pi/generated-tdd/feature-plan/iteration-2.fix-handoff.md");
 });
 
 test("loop state helpers persist, restore, and clear active loop state", async () => {
@@ -164,8 +165,11 @@ test("loop widget reflects iteration, mode, and status", async () => {
 	const cleared: string[] = [];
 	const ctx = {
 		ui: {
-			setWidget(id: string, lines: string[]) {
-				widgetCalls.push({ id, lines });
+			setWidget(id: string, widget: any) {
+				const rendered = typeof widget === "function"
+					? String(widget(null, { fg: (_color: string, value: string) => value }).render(120))
+					: String(widget);
+				widgetCalls.push({ id, lines: rendered.split("\n") });
 			},
 			clearWidget(id: string) {
 				cleared.push(id);
@@ -184,12 +188,16 @@ test("loop widget reflects iteration, mode, and status", async () => {
 		startedAt: "2025-01-01T00:00:00.000Z",
 		updatedAt: "2025-01-01T00:00:00.000Z",
 		lastSummary: "2 findings remain",
+		lastBlockingCount: 1,
+		lastAdvisoryCount: 1,
+		lastHighestPriorityBand: "P1",
 		iterations: [],
 	});
 	assert.equal(widgetCalls[0]?.id, "tdd-plan-loop");
 	assert.match(widgetCalls[0]?.lines.join("\n") ?? "", /2\/4/);
 	assert.match(widgetCalls[0]?.lines.join("\n") ?? "", /ask-each-round/);
 	assert.match(widgetCalls[0]?.lines.join("\n") ?? "", /assessing/);
+	assert.match(widgetCalls[0]?.lines.join("\n") ?? "", /blockers: 1 \(P1\)/);
 
 	await __testables.setLoopWidget(ctx, undefined);
 	assert.deepEqual(cleared, ["tdd-plan-loop"]);
@@ -258,7 +266,7 @@ test("assessment isolation helpers branch to a dedicated assessment session and 
 	assert.deepEqual(navigations[1], { targetId: "origin-leaf", options: { summarize: false } });
 });
 
-test("buildAssessmentFeedbackPrompt turns findings into a review-style fix queue", () => {
+test("buildAssessmentFeedbackPrompt turns findings into a blocker-first review-style fix queue", () => {
 	const prompt = __testables.buildAssessmentFeedbackPrompt({
 		verdict: "fail",
 		summary: "Still too superficial.",
@@ -272,14 +280,25 @@ test("buildAssessmentFeedbackPrompt turns findings into a review-style fix queue
 				requirement: "users can pause recurring invoices",
 				evidence: ["readFileSync('.pi/plans/feature.plan.md')"],
 			},
+			{
+				category: "other",
+				severity: "low",
+				title: "Minor naming polish",
+				details: "One test title could be clearer.",
+				fix: "Rename the title if convenient.",
+			},
 		],
 		strengths: ["Uses the local node:test style."],
 	}, "test code here");
 
 	assert.match(prompt, /mandatory fix queue/i);
 	assert.match(prompt, /Overall verdict: needs attention/i);
+	assert.match(prompt, /Blockers remaining: 1 \(highest blocker band: P1\)/i);
+	assert.match(prompt, /^Blockers:$/m);
+	assert.match(prompt, /^Advisories:$/m);
 	assert.match(prompt, /Reads markdown instead of behavior/);
 	assert.match(prompt, /Required fix: Replace plan-file assertions with runtime behavior checks/i);
+	assert.match(prompt, /Keep every fix repo-grounded/i);
 	assert.match(prompt, /Previous staged test file to improve/i);
 });
 
@@ -296,7 +315,7 @@ test("normalizeAssessment creates an actionable finding when the assessor says f
 	assert.match(normalized.findings[0]?.title ?? "", /fail without actionable findings/i);
 });
 
-test("renderAssessmentSummary produces a concise human-readable review report", () => {
+test("renderAssessmentSummary produces a blocker-aware human-readable review report", () => {
 	const summary = __testables.renderAssessmentSummary({
 		verdict: "fail",
 		summary: "2 issues remain.",
@@ -307,46 +326,155 @@ test("renderAssessmentSummary produces a concise human-readable review report", 
 				title: "Missing pause/resume coverage",
 				details: "No test proves pause/resume behavior.",
 				fix: "Add explicit pause/resume behavior tests.",
+				requirement: "Users can pause and resume recurring invoices",
+				evidence: ["section: Acceptance criteria"],
 			},
 		],
 		strengths: ["Uses realistic repository seams."],
 	});
 
 	assert.match(summary, /^Verdict: needs attention/m);
+	assert.match(summary, /^Blockers: 1$/m);
+	assert.match(summary, /^Highest blocker band: P2$/m);
+	assert.match(summary, /^Top blockers:$/m);
 	assert.match(summary, /^Findings:$/m);
 	assert.match(summary, /Missing pause\/resume coverage/);
 	assert.match(summary, /^Fix queue:$/m);
 	assert.match(summary, /Add explicit pause\/resume behavior tests/);
 });
 
-test("hasBlockingFindings returns true when any finding has high severity", () => {
+test("classifyFinding treats any high-severity finding as blocking", () => {
+	assert.deepEqual(
+		__testables.classifyFinding({
+			category: "superficial-source-tests",
+			severity: "high",
+			title: "Bad test",
+			details: "Details",
+			fix: "Fix it",
+		}),
+		{ disposition: "blocking", priorityBand: "P1" },
+	);
+});
+
+test("classifyFinding blocks medium unrealistic or non-executable findings", () => {
+	assert.deepEqual(
+		__testables.classifyFinding({
+			category: "non-executable-or-unrealistic",
+			severity: "medium",
+			title: "Invented API",
+			details: "The suite invents a non-existent API.",
+			fix: "Use an existing seam.",
+		}),
+		{ disposition: "blocking", priorityBand: "P1" },
+	);
+});
+
+test("classifyFinding blocks medium ambiguity only when it prevents repo-grounded tests", () => {
+	assert.deepEqual(
+		__testables.classifyFinding({
+			category: "ambiguity",
+			severity: "medium",
+			title: "Cannot infer real seam",
+			details: "The plan is too vague to write repo-grounded tests without inventing wiring.",
+			fix: "Clarify the supported seam.",
+		}),
+		{ disposition: "blocking", priorityBand: "P2" },
+	);
+	assert.deepEqual(
+		__testables.classifyFinding({
+			category: "ambiguity",
+			severity: "medium",
+			title: "Minor wording ambiguity",
+			details: "Some naming is vague but tests can still be grounded.",
+			fix: "Clarify naming later.",
+		}),
+		{ disposition: "advisory", priorityBand: "P3" },
+	);
+});
+
+test("classifyFinding blocks medium missing major coverage for primary behavior but not meta-only requirements", () => {
+	assert.deepEqual(
+		__testables.classifyFinding({
+			category: "missing-major-plan-coverage",
+			severity: "medium",
+			title: "Missing primary flow",
+			details: "No test proves the main behavior.",
+			fix: "Add the missing coverage.",
+			requirement: "Users can pause recurring invoices",
+			evidence: ["section: Acceptance criteria"],
+		}),
+		{ disposition: "blocking", priorityBand: "P2" },
+	);
+	assert.deepEqual(
+		__testables.classifyFinding({
+			category: "missing-major-plan-coverage",
+			severity: "medium",
+			title: "Missing scope behavior",
+			details: "No test proves the scoped operational guarantee.",
+			fix: "Add the missing coverage.",
+			requirement: "Audit log entries are visible after pause/resume",
+			evidence: ["section: Scope"],
+		}),
+		{ disposition: "blocking", priorityBand: "P2" },
+	);
+	assert.deepEqual(
+		__testables.classifyFinding({
+			category: "missing-major-plan-coverage",
+			severity: "medium",
+			title: "Missing meta bullet",
+			details: "No generated coverage entry clearly maps to the meta plan-quality item.",
+			fix: "Optional.",
+			requirement: "The plan cites affected modules or explicitly notes when no prior module exists.",
+			evidence: ["section: Acceptance criteria"],
+		}),
+		{ disposition: "advisory", priorityBand: "P3" },
+	);
+});
+
+test("hasBlockingFindings uses the richer blocker policy", () => {
 	assert.equal(
 		__testables.hasBlockingFindings({
 			verdict: "fail",
 			summary: "Issues found.",
 			findings: [
-				{ category: "superficial-source-tests", severity: "high", title: "Bad test", details: "Details", fix: "Fix it" },
 				{ category: "other", severity: "low", title: "Minor issue", details: "Details", fix: "Fix it" },
+				{ category: "non-executable-or-unrealistic", severity: "medium", title: "Invented API", details: "Details", fix: "Fix it" },
 			],
 			strengths: [],
 		}),
 		true,
 	);
-});
-
-test("hasBlockingFindings returns false when all findings are low or medium severity", () => {
 	assert.equal(
 		__testables.hasBlockingFindings({
 			verdict: "fail",
-			summary: "Minor issues.",
+			summary: "Advisory only.",
 			findings: [
 				{ category: "other", severity: "low", title: "Minor issue", details: "Details", fix: "Fix it" },
-				{ category: "other", severity: "medium", title: "Medium issue", details: "Details", fix: "Fix it" },
+				{ category: "other", severity: "medium", title: "Medium polish", details: "Details", fix: "Fix it" },
 			],
 			strengths: [],
 		}),
 		false,
 	);
+});
+
+test("summarizeAssessmentFindings reports blocker counts, advisory counts, and highest priority", () => {
+	const summary = __testables.summarizeAssessmentFindings({
+		verdict: "fail",
+		summary: "Mixed findings.",
+		findings: [
+			{ category: "non-executable-or-unrealistic", severity: "medium", title: "Invented API", details: "Details", fix: "Fix it" },
+			{ category: "other", severity: "low", title: "Minor polish", details: "Details", fix: "Fix it" },
+		],
+		strengths: [],
+	});
+
+	assert.equal(summary.blockingCount, 1);
+	assert.equal(summary.advisoryCount, 1);
+	assert.equal(summary.highestPriorityBand, "P1");
+	assert.equal(summary.severityCounts.medium, 1);
+	assert.equal(summary.severityCounts.low, 1);
+	assert.equal(summary.categoryCounts["non-executable-or-unrealistic"], 1);
 });
 
 test("hasBlockingFindings returns false when there are no findings", () => {

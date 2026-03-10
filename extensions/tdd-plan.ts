@@ -7,14 +7,59 @@ import { Text } from "@mariozechner/pi-tui";
 type TestFramework = "vitest" | "jest" | "unknown";
 type LoopMode = "ask-each-round" | "auto-fix";
 type LoopStatus = "idle" | "generating" | "assessing" | "awaiting-user" | "promoting" | "completed" | "cancelled" | "failed";
-type LoopStopReason = "no-findings-remaining" | "no-blocking-findings" | "user-accepted-current-output" | "safety-cap-reached" | "cancelled" | "generation-failed" | "assessment-failed";
+type LoopStopReason =
+	| "no-findings-remaining"
+	| "no-blocking-findings"
+	| "user-accepted-current-output"
+	| "user-accepted-despite-blockers"
+	| "safety-cap-unresolved"
+	| "cancelled"
+	| "generation-failed"
+	| "assessment-failed";
 type AssessmentIsolationMode = "isolated-single-turn";
 type FindingCategory = "superficial-source-tests" | "missing-major-plan-coverage" | "non-executable-or-unrealistic" | "insufficient-behavioral-assertions" | "ambiguity" | "other";
 type FindingSeverity = "low" | "medium" | "high";
+type FindingPriorityBand = "P0" | "P1" | "P2" | "P3";
+type FindingDisposition = "blocking" | "advisory";
 
 type Requirement = {
 	text: string;
 	heading?: string;
+};
+
+type MachinePlanRequirement = {
+	id: string;
+	text: string;
+	priority?: "primary" | "secondary";
+	sourceSection?: string;
+};
+
+type MachinePlanAmbiguity = {
+	id: string;
+	text: string;
+	blocksTdd?: boolean;
+	sourceSection?: string;
+};
+
+type MachinePlanArtifact = {
+	version: number;
+	sourcePlanPath: string;
+	title?: string;
+	requestedFeature?: string;
+	behavioralRequirements?: MachinePlanRequirement[];
+	testableOperationalRequirements?: MachinePlanRequirement[];
+	blockingAmbiguities?: MachinePlanAmbiguity[];
+	advisoryAmbiguities?: MachinePlanAmbiguity[];
+	outOfScope?: string[];
+	repoGrounding?: {
+		repoContextSummary?: string;
+		relevantFiles?: Array<{ path: string; reason?: string }>;
+	};
+	generationConstraints?: {
+		preferRepoGroundedTests?: boolean;
+		forbidInventedApis?: boolean;
+		preferBehavioralAssertions?: boolean;
+	};
 };
 
 type BehavioralTarget = {
@@ -39,6 +84,11 @@ type PromptPlan = {
 	text: string;
 	truncated: boolean;
 	omittedSectionCount: number;
+};
+
+type MachinePlanPromptSummary = {
+	text: string;
+	requirements: Requirement[];
 };
 
 type RepoContext = {
@@ -85,12 +135,24 @@ type AssessmentResult = {
 	strengths?: string[];
 };
 
+type FindingReviewSummary = {
+	totalFindings: number;
+	blockingCount: number;
+	advisoryCount: number;
+	severityCounts: Record<FindingSeverity, number>;
+	categoryCounts: Record<FindingCategory, number>;
+	highestPriorityBand?: FindingPriorityBand;
+	blockers: Array<AssessorFinding & { priorityBand: FindingPriorityBand }>;
+	advisories: Array<AssessorFinding & { priorityBand: FindingPriorityBand }>;
+};
+
 type LoopIterationRecord = {
 	iteration: number;
 	stagedOutputPath: string;
 	coveragePath: string;
 	findingsPath: string;
 	findingsSummaryPath?: string;
+	fixHandoffPath?: string;
 	generatorMetadataPath: string;
 	coveredRequirements: string[];
 	ambiguousRequirements: string[];
@@ -98,6 +160,15 @@ type LoopIterationRecord = {
 	verdict: "pass" | "fail";
 	summary: string;
 	continueDecision: "continue" | "accept" | "stop";
+	blockingCount: number;
+	advisoryCount: number;
+	severityCounts: Record<FindingSeverity, number>;
+	categoryCounts: Record<FindingCategory, number>;
+	highestPriorityBand?: FindingPriorityBand;
+	promotionReason?: string;
+	humanOverride?: boolean;
+	promotedWithBlockers?: boolean;
+	unresolvedAtSafetyCap?: boolean;
 };
 
 type TddLoopState = {
@@ -116,6 +187,9 @@ type TddLoopState = {
 	stopReason?: LoopStopReason;
 	lastSummary?: string;
 	lastFindings?: AssessorFinding[];
+	lastBlockingCount?: number;
+	lastAdvisoryCount?: number;
+	lastHighestPriorityBand?: FindingPriorityBand;
 	assessmentIsolationMode?: AssessmentIsolationMode;
 	assessmentSessionId?: string;
 	assessmentOriginId?: string;
@@ -275,6 +349,62 @@ function slugify(input: string): string {
 		.slice(0, 60) || "plan";
 }
 
+function buildMachineArtifactPath(planPath: string): string {
+	if (planPath.endsWith(".plan.md")) return planPath.replace(/\.plan\.md$/i, ".plan.tdd.json");
+	if (planPath.endsWith(".md")) return planPath.replace(/\.md$/i, ".plan.tdd.json");
+	return `${planPath}.plan.tdd.json`;
+}
+
+async function loadMachinePlanArtifact(planPath: string): Promise<MachinePlanArtifact | null> {
+	const artifactPath = buildMachineArtifactPath(planPath);
+	if (!(await exists(artifactPath))) return null;
+	try {
+		const raw = await fs.readFile(artifactPath, "utf8");
+		const parsed = parseJson<MachinePlanArtifact>(raw);
+		if (!parsed || typeof parsed !== "object") return null;
+		return parsed;
+	} catch {
+		return null;
+	}
+}
+
+function machineRequirementsToRequirements(items: MachinePlanRequirement[] | undefined, fallbackHeading: string): Requirement[] {
+	return (items ?? [])
+		.filter((item) => typeof item?.text === "string" && item.text.trim().length > 0)
+		.map((item) => ({ text: item.text.trim(), heading: item.sourceSection ?? fallbackHeading }));
+}
+
+function buildMachinePlanPromptSummary(machinePlan: MachinePlanArtifact): MachinePlanPromptSummary {
+	const behavioralRequirements = machineRequirementsToRequirements(machinePlan.behavioralRequirements, "Acceptance criteria");
+	const operationalRequirements = machineRequirementsToRequirements(machinePlan.testableOperationalRequirements, "Clarified decisions");
+	const ambiguityRequirements = (machinePlan.blockingAmbiguities ?? [])
+		.filter((item) => item?.blocksTdd !== false && item?.text?.trim())
+		.map((item) => ({ text: item.text.trim(), heading: item.sourceSection ?? "Open questions" }));
+	const requirements = [
+		...(machinePlan.requestedFeature?.trim() ? [{ text: machinePlan.requestedFeature.trim(), heading: "Requested feature" }] : []),
+		...behavioralRequirements,
+		...operationalRequirements,
+	];
+	const lines = [
+		machinePlan.title ? `Title: ${machinePlan.title}` : undefined,
+		machinePlan.requestedFeature ? `Requested feature: ${machinePlan.requestedFeature}` : undefined,
+		behavioralRequirements.length > 0 ? "Behavioral requirements:\n" + behavioralRequirements.map((req, index) => `- ${index + 1}. [${req.heading}] ${req.text}`).join("\n") : undefined,
+		operationalRequirements.length > 0 ? "Testable operational requirements:\n" + operationalRequirements.map((req, index) => `- ${index + 1}. [${req.heading}] ${req.text}`).join("\n") : undefined,
+		ambiguityRequirements.length > 0 ? "Blocking ambiguities:\n" + ambiguityRequirements.map((req, index) => `- ${index + 1}. [${req.heading}] ${req.text}`).join("\n") : undefined,
+		machinePlan.repoGrounding?.repoContextSummary ? `Repo grounding: ${machinePlan.repoGrounding.repoContextSummary}` : undefined,
+		machinePlan.repoGrounding?.relevantFiles?.length
+			? "Relevant files:\n" + machinePlan.repoGrounding.relevantFiles.map((file) => `- ${file.path}${file.reason ? ` — ${file.reason}` : ""}`).join("\n")
+			: undefined,
+		machinePlan.generationConstraints
+			? `Generation constraints: preferRepoGroundedTests=${machinePlan.generationConstraints.preferRepoGroundedTests === true}, forbidInventedApis=${machinePlan.generationConstraints.forbidInventedApis === true}, preferBehavioralAssertions=${machinePlan.generationConstraints.preferBehavioralAssertions === true}`
+			: undefined,
+	].filter(Boolean);
+	return {
+		text: lines.join("\n\n"),
+		requirements: [...requirements, ...ambiguityRequirements],
+	};
+}
+
 function getSectionPriority(heading?: string): number {
 	if (!heading) return 0;
 	const normalized = heading.toLowerCase();
@@ -390,7 +520,7 @@ function collectBehavioralTargets(markdown: string, requirements: Requirement[])
 
 	const pushTarget = (text: string, heading: string | undefined, source: BehavioralTarget["source"]) => {
 		const normalizedText = text.replace(/\s+/g, " ").trim();
-		if (!normalizedText) return;
+		if (!isBehavioralRequirementText(normalizedText, heading)) return;
 		const key = `${heading ?? ""}::${normalizedText.toLowerCase()}`;
 		if (seen.has(key)) return;
 		seen.add(key);
@@ -430,17 +560,20 @@ function collectBehavioralTargets(markdown: string, requirements: Requirement[])
 	}
 
 	if (targets.length > 0) return targets;
-	return requirements.map((req) => ({
-		text: req.text,
-		heading: req.heading,
-		source: classifyBehavioralHeading(req.heading) ?? "other",
-	}));
+	return requirements
+		.filter((req) => isBehavioralRequirementText(req.text, req.heading))
+		.map((req) => ({
+			text: req.text,
+			heading: req.heading,
+			source: classifyBehavioralHeading(req.heading) ?? "other",
+		}));
 }
 
 function buildPromptRequirements(requirements: Requirement[], behavioralTargets: BehavioralTarget[]): PromptRequirements {
+	const filteredRequirements = requirements.filter((req) => isBehavioralRequirementText(req.text, req.heading));
 	const promptItems = behavioralTargets.length > 0
 		? behavioralTargets.map((target) => ({ text: target.text, heading: target.heading, weight: getSectionPriority(target.heading) + (target.source === "acceptance" ? 3 : target.source === "goal" ? 2 : target.source === "edge-case" ? 2 : 0) }))
-		: requirements.map((req) => ({ text: req.text, heading: req.heading, weight: getSectionPriority(req.heading) }));
+		: filteredRequirements.map((req) => ({ text: req.text, heading: req.heading, weight: getSectionPriority(req.heading) }));
 
 	if (promptItems.length <= MAX_REQUIREMENTS_IN_PROMPT) {
 		return {
@@ -726,9 +859,141 @@ function buildRepoSummary(framework: TestFramework, repoContext: RepoContext): s
 	);
 }
 
-function formatAssessmentFinding(finding: AssessorFinding, index: number): string {
+function extractFindingContextText(finding: AssessorFinding): string {
+	return [finding.title, finding.details, finding.fix, finding.requirement, ...(finding.evidence ?? [])]
+		.filter(Boolean)
+		.join(" ")
+		.toLowerCase();
+}
+
+function extractFindingEvidenceSection(finding: AssessorFinding): string | undefined {
+	for (const evidence of finding.evidence ?? []) {
+		const match = evidence.match(/^section:\s*(.+)$/i);
+		if (match) return match[1].trim().toLowerCase();
+	}
+	return undefined;
+}
+
+function isMetaRequirementText(text?: string): boolean {
+	const normalized = text?.toLowerCase().trim() ?? "";
+	if (!normalized || normalized === "(none)") return true;
 	return [
-		`${index + 1}. [${finding.category}/${finding.severity}] ${finding.title}`,
+		/the feature behavior is documented in repo-grounded terms/,
+		/the plan cites affected modules/,
+		/acceptance criteria cover the primary user-visible flow/,
+		/no obvious existing module is found/,
+		/critical behavior remains ambiguous and needs clarification/,
+		/documentation\/process\/meta/,
+		/out[- ]of[- ]scope/,
+		/unconfirmed product changes beyond the requested feature/,
+		/^review and update\s+(?:[./\w-]+)$/,
+	].some((pattern) => pattern.test(normalized));
+}
+
+function isBehavioralRequirementText(text?: string, heading?: string): boolean {
+	const normalized = text?.replace(/\s+/g, " ").trim() ?? "";
+	if (!normalized) return false;
+	if (isMetaRequirementText(normalized)) return false;
+	const normalizedHeading = heading?.toLowerCase().trim() ?? "";
+	if (/^out of scope$/.test(normalizedHeading)) return false;
+	return true;
+}
+
+function isRepoGroundingBlocker(finding: AssessorFinding): boolean {
+	const text = extractFindingContextText(finding);
+	return [
+		/repo-grounded/,
+		/repository evidence/,
+		/cannot infer/,
+		/can't infer/,
+		/impossible to infer/,
+		/unsupported seam/,
+		/invent(?:ed|ing)?/,
+		/non-existent api/,
+		/unrealistic harness/,
+		/cannot be tested realistically/,
+		/can't be tested realistically/,
+		/insufficiently specified for tdd/,
+	].some((pattern) => pattern.test(text));
+}
+
+function isPrimaryBehaviorHeading(heading?: string): boolean {
+	const normalized = heading?.toLowerCase() ?? "";
+	return /requested feature|problem statement|user story|goal|objective|acceptance|edge cases?|clarified decisions?|scope|security|permissions|performance|rollout|migration|observability/.test(normalized);
+}
+
+function classifyFinding(finding: AssessorFinding): { disposition: FindingDisposition; priorityBand: FindingPriorityBand } {
+	if (finding.severity === "high") {
+		return {
+			disposition: "blocking",
+			priorityBand: finding.category === "non-executable-or-unrealistic" ? "P0" : "P1",
+		};
+	}
+
+	if (finding.severity === "medium") {
+		if (finding.category === "non-executable-or-unrealistic") {
+			return { disposition: "blocking", priorityBand: "P1" };
+		}
+		if (finding.category === "ambiguity" && isRepoGroundingBlocker(finding)) {
+			return { disposition: "blocking", priorityBand: "P2" };
+		}
+		if (finding.category === "missing-major-plan-coverage") {
+			const heading = extractFindingEvidenceSection(finding);
+			if (isBehavioralRequirementText(finding.requirement, heading) && (!heading || isPrimaryBehaviorHeading(heading))) {
+				return { disposition: "blocking", priorityBand: "P2" };
+			}
+		}
+	}
+
+	return { disposition: "advisory", priorityBand: "P3" };
+}
+
+function comparePriorityBands(a: FindingPriorityBand, b: FindingPriorityBand): number {
+	const order: FindingPriorityBand[] = ["P0", "P1", "P2", "P3"];
+	return order.indexOf(a) - order.indexOf(b);
+}
+
+function summarizeAssessmentFindings(assessment: AssessmentResult): FindingReviewSummary {
+	const severityCounts: Record<FindingSeverity, number> = { low: 0, medium: 0, high: 0 };
+	const categoryCounts: Record<FindingCategory, number> = {
+		"superficial-source-tests": 0,
+		"missing-major-plan-coverage": 0,
+		"non-executable-or-unrealistic": 0,
+		"insufficient-behavioral-assertions": 0,
+		ambiguity: 0,
+		other: 0,
+	};
+	const blockers: Array<AssessorFinding & { priorityBand: FindingPriorityBand }> = [];
+	const advisories: Array<AssessorFinding & { priorityBand: FindingPriorityBand }> = [];
+
+	for (const finding of assessment.findings) {
+		severityCounts[finding.severity] += 1;
+		categoryCounts[finding.category] += 1;
+		const classified = classifyFinding(finding);
+		const enriched = { ...finding, priorityBand: classified.priorityBand };
+		if (classified.disposition === "blocking") blockers.push(enriched);
+		else advisories.push(enriched);
+	}
+
+	blockers.sort((a, b) => comparePriorityBands(a.priorityBand, b.priorityBand));
+	advisories.sort((a, b) => comparePriorityBands(a.priorityBand, b.priorityBand));
+
+	return {
+		totalFindings: assessment.findings.length,
+		blockingCount: blockers.length,
+		advisoryCount: advisories.length,
+		severityCounts,
+		categoryCounts,
+		highestPriorityBand: blockers[0]?.priorityBand,
+		blockers,
+		advisories,
+	};
+}
+
+function formatAssessmentFinding(finding: AssessorFinding, index: number): string {
+	const classified = classifyFinding(finding);
+	return [
+		`${index + 1}. [${classified.priorityBand}] [${classified.disposition}] [${finding.category}/${finding.severity}] ${finding.title}`,
 		`   Why this matters: ${finding.details}`,
 		`   Required fix: ${finding.fix}`,
 		finding.requirement ? `   Requirement: ${finding.requirement}` : undefined,
@@ -737,45 +1002,69 @@ function formatAssessmentFinding(finding: AssessorFinding, index: number): strin
 }
 
 function buildAssessmentFeedbackPrompt(assessment: AssessmentResult, priorTestCode?: string): string {
-	const findings = assessment.findings.length > 0
-		? assessment.findings.map((finding, index) => formatAssessmentFinding(finding, index)).join("\n\n")
-		: "- No actionable findings were returned.";
-	const fixQueue = assessment.findings.length > 0
-		? assessment.findings.map((finding, index) => `- Fix ${index + 1}: ${finding.fix}`).join("\n")
+	const summary = summarizeAssessmentFindings(assessment);
+	const blockers = summary.blockers.length > 0
+		? summary.blockers.map((finding, index) => formatAssessmentFinding(finding, index)).join("\n\n")
+		: "- No blocker-class findings remain.";
+	const advisories = summary.advisories.length > 0
+		? summary.advisories.map((finding, index) => formatAssessmentFinding(finding, index)).join("\n\n")
+		: "- No advisory findings recorded.";
+	const fixQueueItems = [...summary.blockers, ...summary.advisories];
+	const fixQueue = fixQueueItems.length > 0
+		? fixQueueItems.map((finding, index) => `- Fix ${index + 1} [${finding.priorityBand}/${classifyFinding(finding).disposition}]: ${finding.fix}`).join("\n")
 		: "- No fix queue provided.";
 
 	return [
 		"Previous round review (treat this as a mandatory fix queue):",
 		`Overall verdict: ${assessment.verdict === "pass" ? "correct" : "needs attention"}`,
 		`Summary: ${assessment.summary}`,
+		`Blockers remaining: ${summary.blockingCount}${summary.highestPriorityBand ? ` (highest blocker band: ${summary.highestPriorityBand})` : ""}`,
+		`Advisories remaining: ${summary.advisoryCount}`,
 		"",
-		"Findings:",
-		findings,
+		"Blockers:",
+		blockers,
+		"",
+		"Advisories:",
+		advisories,
 		"",
 		"Fix queue:",
 		fixQueue,
 		"",
 		"Revision instructions:",
-		"- Address every finding directly.",
+		"- Address blocker findings before polishing advisory issues.",
+		"- Treat unrealistic harness assumptions, invented APIs, and missing primary-flow coverage as promotion blockers.",
+		"- Keep every fix repo-grounded: reuse existing seams, imports, and test conventions instead of inventing unsupported wiring.",
 		"- Remove any cited superficial assertions, unrealistic harness assumptions, or missing coverage gaps.",
-		"- Rewrite the test file freely if that is the simplest way to close the findings.",
+		"- Rewrite the test file freely if that is the simplest way to close the findings; do not preserve broken patterns blindly.",
 		priorTestCode ? `\nPrevious staged test file to improve (do not preserve bad patterns blindly):\n\n${priorTestCode}` : undefined,
 	].filter(Boolean).join("\n");
 }
 
 function renderAssessmentSummary(assessment: AssessmentResult): string {
+	const summary = summarizeAssessmentFindings(assessment);
 	const findings = assessment.findings.length > 0
-		? assessment.findings.map((finding, index) => `- ${index + 1}. ${finding.title} (${finding.category}/${finding.severity})`).join("\n")
+		? [...summary.blockers, ...summary.advisories].map((finding, index) => `- ${index + 1}. [${finding.priorityBand}] [${classifyFinding(finding).disposition}] ${finding.title} (${finding.category}/${finding.severity})`).join("\n")
 		: "- No actionable findings.";
+	const topBlockers = summary.blockers.length > 0
+		? summary.blockers.slice(0, 3).map((finding) => `- [${finding.priorityBand}] ${finding.title} (${finding.category}/${finding.severity})`).join("\n")
+		: "- None.";
 	const strengths = assessment.strengths?.length
 		? assessment.strengths.map((item) => `- ${item}`).join("\n")
 		: "- None recorded.";
-	const fixQueue = assessment.findings.length > 0
-		? assessment.findings.map((finding, index) => `- ${index + 1}. ${finding.fix}`).join("\n")
+	const fixQueueItems = [...summary.blockers, ...summary.advisories];
+	const fixQueue = fixQueueItems.length > 0
+		? fixQueueItems.map((finding, index) => `- ${index + 1}. [${finding.priorityBand}/${classifyFinding(finding).disposition}] ${finding.fix}`).join("\n")
 		: "- No fixes required.";
 	return [
 		`Verdict: ${assessment.verdict === "pass" ? "correct" : "needs attention"}`,
 		`Summary: ${assessment.summary}`,
+		`Blockers: ${summary.blockingCount}`,
+		`Advisories: ${summary.advisoryCount}`,
+		`Severity counts: high=${summary.severityCounts.high}, medium=${summary.severityCounts.medium}, low=${summary.severityCounts.low}`,
+		`Highest blocker band: ${summary.highestPriorityBand ?? "none"}`,
+		"",
+		"Top blockers:",
+		topBlockers,
 		"",
 		"Findings:",
 		findings,
@@ -794,6 +1083,7 @@ async function generateWithModel(
 	planPath: string,
 	planText: string,
 	requirements: Requirement[],
+	machinePlanSummary: string | undefined,
 	outputPath: string,
 	repoContext: RepoContext,
 	signal?: AbortSignal,
@@ -825,6 +1115,10 @@ async function generateWithModel(
 		? `\n\n${buildAssessmentFeedbackPrompt(options.assessment, options.priorTestCode)}`
 		: "";
 
+	const machineSummaryBlock = machinePlanSummary
+		? `\n\nMachine-oriented TDD contract (preferred over markdown boilerplate when present):\n${machinePlanSummary}`
+		: "";
+
 	const userPrompt = `Framework: ${framework === "unknown" ? "Prefer Vitest but mirror local conventions" : framework}
 Suggested output path: ${outputPath}
 Plan path: ${planPath}
@@ -834,7 +1128,7 @@ Repository context:
 ${repoSummary}
 
 Existing test examples:
-${exampleText}
+${exampleText}${machineSummaryBlock}
 
 Behavioral targets inferred from the plan goal (these are the system behaviors to test, not markdown assertions):
 ${behavioralSummary}
@@ -919,7 +1213,7 @@ function normalizeAssessment(result: AssessmentResult | null): AssessmentResult 
 }
 
 function hasBlockingFindings(assessment: AssessmentResult): boolean {
-	return assessment.findings.some((f) => f.severity === "high");
+	return summarizeAssessmentFindings(assessment).blockingCount > 0;
 }
 
 function detectSuperficialPatterns(testCode: string): AssessorFinding[] {
@@ -989,6 +1283,7 @@ function requirementCoverageMatches(requirement: string, coveredRequirement: str
 
 function detectCoverageGaps(requirements: Requirement[], coveredRequirements: string[]): AssessorFinding[] {
 	const important = requirements.filter((req) => {
+		if (!isBehavioralRequirementText(req.text, req.heading)) return false;
 		const heading = req.heading?.toLowerCase() ?? "";
 		return /acceptance|requested feature|problem statement|scope|clarified decisions|edge cases|performance|rollout|observability|security/.test(heading);
 	});
@@ -1011,6 +1306,7 @@ async function assessGeneratedSpec(
 	planPath: string,
 	planText: string,
 	requirements: Requirement[],
+	machinePlanSummary: string | undefined,
 	repoContext: RepoContext,
 	generated: GeneratedSpec,
 	stagedOutputPath: string,
@@ -1022,13 +1318,14 @@ async function assessGeneratedSpec(
 
 	const promptPlan = buildPromptPlan(planText);
 	const repoSummary = buildRepoSummary(framework, repoContext);
+	const machineSummaryBlock = machinePlanSummary ? `\n\nMachine-oriented TDD contract:\n${machinePlanSummary}` : "";
 	const userPrompt = `Review this generated test suite independently.
 
 Plan path: ${planPath}
 Staged output path: ${stagedOutputPath}
 
 Repository context:
-${repoSummary}
+${repoSummary}${machineSummaryBlock}
 
 Generator metadata:
 ${JSON.stringify({
@@ -1168,6 +1465,7 @@ function buildLoopIterationPaths(rootDir: string, planPath: string, repoContext:
 	coveragePath: string;
 	findingsPath: string;
 	findingsSummaryPath: string;
+	fixHandoffPath: string;
 	generatorMetadataPath: string;
 } {
 	const baseDir = buildLoopArtifactsBaseDir(rootDir, planPath);
@@ -1180,6 +1478,7 @@ function buildLoopIterationPaths(rootDir: string, planPath: string, repoContext:
 		coveragePath: path.join(baseDir, `iteration-${iteration}.coverage.json`),
 		findingsPath: path.join(baseDir, `iteration-${iteration}.findings.json`),
 		findingsSummaryPath: path.join(baseDir, `iteration-${iteration}.findings.md`),
+		fixHandoffPath: path.join(baseDir, `iteration-${iteration}.fix-handoff.md`),
 		generatorMetadataPath: path.join(baseDir, `iteration-${iteration}.generator.json`),
 	};
 }
@@ -1313,9 +1612,13 @@ async function setLoopWidget(ctx: any, state?: TddLoopState): Promise<void> {
 		}
 		return;
 	}
+	const blockerLine = state.lastBlockingCount !== undefined
+		? `blockers: ${state.lastBlockingCount}${state.lastHighestPriorityBand ? ` (${state.lastHighestPriorityBand})` : ""} · advisories: ${state.lastAdvisoryCount ?? 0}`
+		: `plan: ${state.slug}`;
 	const message = [
 		`TDD loop active (${state.iteration}/${state.maxIterations})`,
 		`${state.loopMode} · ${state.status}`,
+		blockerLine,
 		state.lastSummary ? state.lastSummary.slice(0, 100) : `plan: ${state.slug}`,
 	].join("\n");
 	if (typeof ctx.ui.setWidget === "function") {
@@ -1417,6 +1720,8 @@ async function prepareGenerationContext(ctx: ExtensionContext, planInput: string
 	planPath: string;
 	planText: string;
 	requirements: Requirement[];
+	machinePlan: MachinePlanArtifact | null;
+	machinePlanSummary?: string;
 	pkg: { path: string; data: Record<string, any> } | null;
 	rootDir: string;
 	framework: TestFramework;
@@ -1427,7 +1732,9 @@ async function prepareGenerationContext(ctx: ExtensionContext, planInput: string
 	if (!(await exists(planPath))) throw new Error(`Plan file not found: ${planPath}`);
 
 	const planText = await fs.readFile(planPath, "utf8");
-	const requirements = extractRequirements(planText);
+	const machinePlan = await loadMachinePlanArtifact(planPath);
+	const machinePlanPrompt = machinePlan ? buildMachinePlanPromptSummary(machinePlan) : undefined;
+	const requirements = machinePlanPrompt?.requirements.length ? machinePlanPrompt.requirements : extractRequirements(planText);
 	const pkg = await loadPackageJson(ctx.cwd);
 	const rootDir = pkg ? path.dirname(pkg.path) : ctx.cwd;
 	const framework = detectFramework(pkg?.data ?? null);
@@ -1443,6 +1750,8 @@ async function prepareGenerationContext(ctx: ExtensionContext, planInput: string
 		planPath,
 		planText,
 		requirements,
+		machinePlan,
+		machinePlanSummary: machinePlanPrompt?.text,
 		pkg,
 		rootDir,
 		framework,
@@ -1463,7 +1772,7 @@ async function generateSinglePass(
 	prepared: Awaited<ReturnType<typeof prepareGenerationContext>>,
 	runTests: boolean,
 ): Promise<void> {
-	const { planPath, planText, requirements, rootDir, framework, repoContext, suggestedOutput } = prepared;
+	const { planPath, planText, requirements, machinePlan, machinePlanSummary, rootDir, framework, repoContext, suggestedOutput } = prepared;
 	const generation = await runWithLoader(ctx, `Generating TDD tests using ${ctx.model?.id ?? "model"}...`, (signal) =>
 		generateWithModel(
 			ctx,
@@ -1471,6 +1780,7 @@ async function generateSinglePass(
 			path.relative(rootDir, planPath),
 			planText,
 			requirements,
+			machinePlanSummary,
 			suggestedOutput,
 			repoContext,
 			signal,
@@ -1498,6 +1808,7 @@ async function generateSinglePass(
 	await fs.writeFile(outputPath, generated.testCode.endsWith("\n") ? generated.testCode : generated.testCode + "\n", "utf8");
 	await writeJson(coveragePath, {
 		planPath: path.relative(rootDir, planPath),
+		machineArtifactPath: machinePlan ? path.relative(rootDir, buildMachineArtifactPath(planPath)) : undefined,
 		framework: generated.framework,
 		outputPath: path.relative(rootDir, outputPath),
 		repoContext: {
@@ -1548,7 +1859,7 @@ async function runTddPlanLoop(
 	loopMode: LoopMode,
 	runTests: boolean,
 ): Promise<void> {
-	const { planPath, planText, requirements, rootDir, framework, repoContext, suggestedOutput } = prepared;
+	const { planPath, planText, requirements, machinePlan, machinePlanSummary, rootDir, framework, repoContext, suggestedOutput } = prepared;
 	const slug = slugify(path.basename(planPath));
 	const finalOutputPath = pickDefaultOutputPath(rootDir, planPath, repoContext, suggestedOutput);
 	const coveragePath = path.join(rootDir, ".pi", "generated-tdd", `${slug}.coverage.json`);
@@ -1599,6 +1910,7 @@ async function runTddPlanLoop(
 				path.relative(rootDir, planPath),
 				planText,
 				requirements,
+				machinePlanSummary,
 				finalOutputPath,
 				repoContext,
 				signal,
@@ -1647,6 +1959,7 @@ async function runTddPlanLoop(
 		});
 		await writeJson(iterationPaths.coveragePath, {
 			planPath: path.relative(rootDir, planPath),
+			machineArtifactPath: machinePlan ? path.relative(rootDir, buildMachineArtifactPath(planPath)) : undefined,
 			framework: generated.framework,
 			outputPath: path.relative(rootDir, iterationPaths.stagedOutputPath),
 			requirements: requirements.map((r) => ({ text: r.text, heading: r.heading ?? null })),
@@ -1689,6 +2002,7 @@ async function runTddPlanLoop(
 				path.relative(rootDir, planPath),
 				planText,
 				requirements,
+				machinePlanSummary,
 				repoContext,
 				generated,
 				path.relative(rootDir, iterationPaths.stagedOutputPath),
@@ -1729,9 +2043,14 @@ async function runTddPlanLoop(
 			});
 			assessment.verdict = "fail";
 		}
+		const findingSummary = summarizeAssessmentFindings(assessment);
 		await writeJson(iterationPaths.findingsPath, assessment);
 		await ensureDir(iterationPaths.findingsSummaryPath);
 		await fs.writeFile(iterationPaths.findingsSummaryPath, renderAssessmentSummary(assessment) + "\n", "utf8");
+		if (assessment.findings.length > 0) {
+			await ensureDir(iterationPaths.fixHandoffPath);
+			await fs.writeFile(iterationPaths.fixHandoffPath, buildAssessmentFeedbackPrompt(assessment) + "\n", "utf8");
+		}
 
 		const iterationRecord: LoopIterationRecord = {
 			iteration,
@@ -1739,6 +2058,7 @@ async function runTddPlanLoop(
 			coveragePath: path.relative(rootDir, iterationPaths.coveragePath),
 			findingsPath: path.relative(rootDir, iterationPaths.findingsPath),
 			findingsSummaryPath: path.relative(rootDir, iterationPaths.findingsSummaryPath),
+			fixHandoffPath: assessment.findings.length > 0 ? path.relative(rootDir, iterationPaths.fixHandoffPath) : undefined,
 			generatorMetadataPath: path.relative(rootDir, iterationPaths.generatorMetadataPath),
 			coveredRequirements: generated.coveredRequirements,
 			ambiguousRequirements: generated.ambiguousRequirements ?? [],
@@ -1746,12 +2066,23 @@ async function runTddPlanLoop(
 			verdict: assessment.verdict,
 			summary: assessment.summary,
 			continueDecision: "continue",
+			blockingCount: findingSummary.blockingCount,
+			advisoryCount: findingSummary.advisoryCount,
+			severityCounts: findingSummary.severityCounts,
+			categoryCounts: findingSummary.categoryCounts,
+			highestPriorityBand: findingSummary.highestPriorityBand,
+			humanOverride: false,
+			promotedWithBlockers: false,
+			unresolvedAtSafetyCap: false,
 		};
 		state = await applyLoopState({ ...ctx, pi }, {
 			...state,
-			status: assessment.verdict === "pass" ? "promoting" : loopMode === "ask-each-round" ? "awaiting-user" : "assessing",
+			status: findingSummary.blockingCount === 0 ? "promoting" : loopMode === "ask-each-round" ? "awaiting-user" : "assessing",
 			lastSummary: assessment.summary,
 			lastFindings: assessment.findings,
+			lastBlockingCount: findingSummary.blockingCount,
+			lastAdvisoryCount: findingSummary.advisoryCount,
+			lastHighestPriorityBand: findingSummary.highestPriorityBand,
 			iterations: [...state.iterations, iterationRecord],
 			updatedAt: new Date().toISOString(),
 		});
@@ -1763,6 +2094,7 @@ async function runTddPlanLoop(
 		if (assessment.findings.length === 0) {
 			accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
 			state.iterations[state.iterations.length - 1].continueDecision = "accept";
+			state.iterations[state.iterations.length - 1].promotionReason = "clean promotion with no findings remaining";
 			state = await applyLoopState({ ...ctx, pi }, {
 				...state,
 				status: "promoting",
@@ -1773,10 +2105,11 @@ async function runTddPlanLoop(
 			break;
 		}
 
-		if (!hasBlockingFindings(assessment)) {
-			notify(ctx, `TDD loop: no blocking findings remain after round ${iteration}, accepting staged tests.`, "info");
+		if (findingSummary.blockingCount === 0) {
+			notify(ctx, `TDD loop: blockers cleared after round ${iteration}; accepting staged tests with ${findingSummary.advisoryCount} advisory finding(s).`, "info");
 			accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
 			state.iterations[state.iterations.length - 1].continueDecision = "accept";
+			state.iterations[state.iterations.length - 1].promotionReason = "promoted with advisory-only findings";
 			state = await applyLoopState({ ...ctx, pi }, {
 				...state,
 				status: "promoting",
@@ -1787,16 +2120,24 @@ async function runTddPlanLoop(
 			break;
 		}
 
-		notify(ctx, `TDD loop round ${iteration}: ${assessment.findings.length} finding(s)`, "warning");
-		if (assessment.findings.length > 0) {
-			const topFindings = assessment.findings
+		notify(
+			ctx,
+			`TDD loop round ${iteration}: ${findingSummary.blockingCount} blocker(s), ${findingSummary.advisoryCount} advisory finding(s)${findingSummary.highestPriorityBand ? `, highest ${findingSummary.highestPriorityBand}` : ""}`,
+			"warning",
+		);
+		if (findingSummary.blockers.length > 0) {
+			const topFindings = findingSummary.blockers
 				.slice(0, 3)
-				.map((finding, index) => `${index + 1}. ${finding.title} — ${finding.fix}`)
+				.map((finding, index) => `${index + 1}. [${finding.priorityBand}] ${finding.title} — ${finding.fix}`)
 				.join("\n");
 			notify(ctx, topFindings, "warning");
 		}
 		if (loopMode === "ask-each-round" && ctx.hasUI && typeof ctx.ui.select === "function") {
-			const choice = await ctx.ui.select("Current generated tests still have findings:", ["Continue fixing", "Accept current staged tests", "Cancel loop"]);
+			const overrideLabel = findingSummary.blockingCount > 0 ? "Accept despite blockers" : "Accept current staged tests";
+			const choice = await ctx.ui.select(
+				`Current generated tests still have blockers (${findingSummary.blockingCount}, highest ${findingSummary.highestPriorityBand ?? "none"}).`,
+				["Continue fixing", overrideLabel, "Cancel loop"],
+			);
 			if (!choice || choice === "Cancel loop") {
 				state.iterations[state.iterations.length - 1].continueDecision = "stop";
 				state = await applyLoopState({ ...ctx, pi }, {
@@ -1811,13 +2152,18 @@ async function runTddPlanLoop(
 				notify(ctx, "tdd-plan loop cancelled", "info");
 				return;
 			}
-			if (choice === "Accept current staged tests") {
+			if (choice === overrideLabel) {
 				accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
 				state.iterations[state.iterations.length - 1].continueDecision = "accept";
+				state.iterations[state.iterations.length - 1].promotionReason = findingSummary.blockingCount > 0
+					? "user override despite blockers"
+					: "user accepted current staged output";
+				state.iterations[state.iterations.length - 1].humanOverride = findingSummary.blockingCount > 0;
+				state.iterations[state.iterations.length - 1].promotedWithBlockers = findingSummary.blockingCount > 0;
 				state = await applyLoopState({ ...ctx, pi }, {
 					...state,
 					status: "promoting",
-					stopReason: "user-accepted-current-output",
+					stopReason: findingSummary.blockingCount > 0 ? "user-accepted-despite-blockers" : "user-accepted-current-output",
 					updatedAt: new Date().toISOString(),
 				});
 				break;
@@ -1825,12 +2171,14 @@ async function runTddPlanLoop(
 		}
 
 		if (iteration === LOOP_MAX_ITERATIONS) {
-			accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
 			state.iterations[state.iterations.length - 1].continueDecision = "stop";
+			state.iterations[state.iterations.length - 1].promotionReason = "stopped unresolved at safety cap";
+			state.iterations[state.iterations.length - 1].unresolvedAtSafetyCap = true;
 			state = await applyLoopState({ ...ctx, pi }, {
 				...state,
-				status: "promoting",
-				stopReason: "safety-cap-reached",
+				status: "failed",
+				stopReason: "safety-cap-unresolved",
+				lastSummary: assessment.summary || "Safety cap reached with blockers still open.",
 				updatedAt: new Date().toISOString(),
 			});
 			break;
@@ -1847,15 +2195,21 @@ async function runTddPlanLoop(
 		await writeJson(loopSummaryPath, state);
 		await clearLoopState({ ...ctx, pi });
 		await setLoopWidget(ctx, undefined);
-		notify(ctx, "tdd-plan loop failed to produce an accepted staged result.", "error");
+		if (state.stopReason === "safety-cap-unresolved") {
+			notify(ctx, "tdd-plan loop reached the safety cap with blocker-class findings still open; staged output was not promoted.", "warning");
+		} else {
+			notify(ctx, "tdd-plan loop failed to produce an accepted staged result.", "error");
+		}
 		return;
 	}
 
 	await ensureDir(finalOutputPath);
 	const finalCode = accepted.generated.testCode.endsWith("\n") ? accepted.generated.testCode : accepted.generated.testCode + "\n";
 	await fs.writeFile(finalOutputPath, finalCode, "utf8");
+	const finalIteration = state.iterations[state.iterations.length - 1];
 	await writeJson(coveragePath, {
 		planPath: path.relative(rootDir, planPath),
+		machineArtifactPath: machinePlan ? path.relative(rootDir, buildMachineArtifactPath(planPath)) : undefined,
 		framework: accepted.generated.framework,
 		outputPath: path.relative(rootDir, finalOutputPath),
 		requirements: requirements.map((r) => ({ text: r.text, heading: r.heading ?? null })),
@@ -1865,6 +2219,13 @@ async function runTddPlanLoop(
 		loopMode,
 		iterations: state.iterations,
 		finalStopReason: state.stopReason,
+		promotionReason: finalIteration?.promotionReason,
+		blockerCount: finalIteration?.blockingCount ?? 0,
+		advisoryCount: finalIteration?.advisoryCount ?? 0,
+		highestPriorityBand: finalIteration?.highestPriorityBand,
+		humanOverride: finalIteration?.humanOverride ?? false,
+		promotedWithBlockers: finalIteration?.promotedWithBlockers ?? false,
+		unresolvedAtSafetyCap: finalIteration?.unresolvedAtSafetyCap ?? false,
 		promotedFrom: path.relative(rootDir, accepted.stagedOutputPath),
 		generatedAt: new Date().toISOString(),
 	});
@@ -1888,6 +2249,9 @@ async function runTddPlanLoop(
 		active: false,
 		status: "completed",
 		finalOutputPath: path.relative(rootDir, finalOutputPath),
+		lastBlockingCount: finalIteration?.blockingCount ?? state.lastBlockingCount,
+		lastAdvisoryCount: finalIteration?.advisoryCount ?? state.lastAdvisoryCount,
+		lastHighestPriorityBand: finalIteration?.highestPriorityBand ?? state.lastHighestPriorityBand,
 		updatedAt: new Date().toISOString(),
 	});
 	await writeJson(loopSummaryPath, state);
@@ -1895,18 +2259,38 @@ async function runTddPlanLoop(
 	await setLoopWidget(ctx, undefined);
 
 	notify(ctx, `Generated TDD tests: ${path.relative(rootDir, finalOutputPath)}`, "info");
-	notify(ctx, `Loop stop reason: ${state.stopReason ?? "completed"}`, state.stopReason === "no-findings-remaining" || state.stopReason === "no-blocking-findings" ? "info" : "warning");
+	if (state.stopReason === "no-findings-remaining") {
+		notify(ctx, "Loop result: clean promotion with no remaining findings.", "info");
+	} else if (state.stopReason === "no-blocking-findings") {
+		notify(ctx, `Loop result: promoted with advisory-only findings (${finalIteration?.advisoryCount ?? 0}).`, "info");
+	} else if (state.stopReason === "user-accepted-despite-blockers") {
+		notify(ctx, `Loop result: promoted via human override despite ${finalIteration?.blockingCount ?? 0} blocker(s).`, "warning");
+	} else {
+		notify(ctx, `Loop stop reason: ${state.stopReason ?? "completed"}`, "warning");
+	}
 	if (state.lastFindings?.length) notify(ctx, `Final round findings preserved: ${state.lastFindings.length}`, "warning");
 }
 
 export const __testables = {
 	systemPrompt: SYSTEM_PROMPT,
 	assessorSystemPrompt: ASSESSOR_SYSTEM_PROMPT,
+	extractFindingContextText,
+	extractFindingEvidenceSection,
+	isMetaRequirementText,
+	isBehavioralRequirementText,
+	isRepoGroundingBlocker,
+	isPrimaryBehaviorHeading,
+	classifyFinding,
+	summarizeAssessmentFindings,
 	formatAssessmentFinding,
 	buildAssessmentFeedbackPrompt,
 	renderAssessmentSummary,
 	normalizeAssessment,
 	hasBlockingFindings,
+	buildMachineArtifactPath,
+	loadMachinePlanArtifact,
+	machineRequirementsToRequirements,
+	buildMachinePlanPromptSummary,
 	detectFramework,
 	getConfigTestEntries,
 	inferTestDirectoriesFromText,

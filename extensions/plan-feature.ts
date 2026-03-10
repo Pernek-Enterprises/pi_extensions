@@ -55,6 +55,7 @@ type PlanningSessionState = {
 	decisions: string[];
 	currentDraft?: string;
 	savedPath?: string;
+	savedMachinePath?: string;
 	lastInteractivePromptSignature?: string;
 };
 
@@ -71,6 +72,42 @@ type PlanMarkdownInput = {
 	openQuestions?: string[];
 	acceptanceCriteria?: string[];
 	edgeCases?: string[];
+};
+
+type PlanMachineRequirement = {
+	id: string;
+	text: string;
+	priority: "primary" | "secondary";
+	sourceSection: string;
+};
+
+type PlanMachineAmbiguity = {
+	id: string;
+	text: string;
+	blocksTdd: boolean;
+	sourceSection: string;
+};
+
+type PlanMachineArtifact = {
+	version: 1;
+	generatedAt: string;
+	sourcePlanPath: string;
+	title: string;
+	requestedFeature: string;
+	behavioralRequirements: PlanMachineRequirement[];
+	testableOperationalRequirements: PlanMachineRequirement[];
+	blockingAmbiguities: PlanMachineAmbiguity[];
+	advisoryAmbiguities: PlanMachineAmbiguity[];
+	outOfScope: string[];
+	repoGrounding: {
+		repoContextSummary?: string;
+		relevantFiles: Array<{ path: string; reason?: string }>;
+	};
+	generationConstraints: {
+		preferRepoGroundedTests: true;
+		forbidInventedApis: true;
+		preferBehavioralAssertions: true;
+	};
 };
 
 const PLANNING_STATE_TYPE = "planning-session";
@@ -126,8 +163,10 @@ function getSessionEntries(ctx: any): any[] {
 }
 
 function getCustomEntryData(entry: any): any | undefined {
-	if (!entry || entry.type !== "custom") return undefined;
-	return entry.data;
+	if (!entry) return undefined;
+	if (entry.type === "custom") return entry.data;
+	if (Object.prototype.hasOwnProperty.call(entry, "value")) return entry.value;
+	return undefined;
 }
 
 function appendCustomEntry(target: any, customType: string, data: unknown): any {
@@ -151,7 +190,9 @@ function loadPersistedPlanningState(ctx: any): PlanningSessionState | undefined 
 	const entries = getSessionEntries(ctx);
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry?.type !== "custom" || entry?.customType !== PLANNING_STATE_TYPE) continue;
+		const isCustomShape = entry?.type === "custom" && entry?.customType === PLANNING_STATE_TYPE;
+		const isLegacyShape = entry?.type === PLANNING_STATE_TYPE;
+		if (!isCustomShape && !isLegacyShape) continue;
 		const data = getCustomEntryData(entry);
 		if (!data || data.active === false) return undefined;
 		activePlanningState = data as PlanningSessionState;
@@ -538,25 +579,7 @@ async function endPlanningSession(ctx: any): Promise<void> {
 			return;
 		}
 		if (choice === "Save plan") {
-			const relativePath = path.join(".pi", "plans", `${state.slug}.plan.md`);
-			const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
-			await mkdirImpl(path.dirname(absolutePath), { recursive: true });
-			await writeFileImpl(absolutePath, state.currentDraft.endsWith("\n") ? state.currentDraft : `${state.currentDraft}\n`, "utf8");
-			const savedPath = path.relative(state.repoRoot, absolutePath);
-			const nextState: PlanningSessionState = {
-				...state,
-				savedPath,
-				status: "finalized",
-				updatedAt: new Date().toISOString(),
-			};
-			appendCustomEntry(ctx.pi ?? ctx, PLANNING_METADATA_TYPE, {
-				id: state.id,
-				slug: state.slug,
-				savedPath,
-				updatedAt: nextState.updatedAt,
-			});
-			await applyPlanningState(ctx, nextState);
-			notify(ctx, `Plan saved: ${savedPath}`);
+			await savePlanningDraft(ctx, ctx.pi ?? ctx, state);
 		}
 	}
 
@@ -582,6 +605,9 @@ function buildPlanningSystemPrompt(): string {
 		"You are in feature planning mode.",
 		"Cite repo evidence explicitly and distinguish facts from assumptions.",
 		"Ask concise, high-value questions that materially affect implementation.",
+		"Keep the final plan short, clear, and easy to scan.",
+		"Prefer short bullets over long prose.",
+		"Only keep sections that add real value; omit empty or boilerplate sections.",
 		"Avoid implementation code, avoid generic product-discovery fluff, and do not jump straight into coding.",
 		"Do not invent architecture unsupported by the repository or ask giant questionnaires.",
 		"If critical blockers remain unclear, call them out before finalizing.",
@@ -593,51 +619,182 @@ function buildPlanningSystemPrompt(): string {
 }
 
 function buildFinalizationPrompt(): string {
-	return "Stop questioning and finalize the plan in structured markdown. Then suggest /plan-save as the next step.";
+	return "Stop questioning and finalize the plan in short structured markdown. Keep it concise, use only sections that add value, omit empty/boilerplate sections, then suggest /plan-save as the next step.";
 }
 
 function section(title: string, items?: string[], ordered = false): string {
 	const values = items?.filter(Boolean) ?? [];
-	if (values.length === 0) return `## ${title}\n- (none)`;
+	if (values.length === 0) return "";
 	if (ordered) return `## ${title}\n${values.map((item, i) => `${i + 1}. ${item}`).join("\n")}`;
 	return `## ${title}\n${values.map((item) => `- ${item}`).join("\n")}`;
 }
 
 function renderPlanMarkdown(input: PlanMarkdownInput): string {
-	const parts = [
-		`# Plan: ${input.title}`,
-		"",
-	];
+	const sections = [
+		(input.recommendedSplit?.filter(Boolean) ?? []).length > 0 ? section("Recommended Split", input.recommendedSplit) : "",
+		"## Requested feature\n" + input.originalInput,
+		input.repoContextSummary ? `## Existing codebase context\n${input.repoContextSummary}` : "",
+		input.problemStatement ? `## Problem statement\n${input.problemStatement}` : "",
+		section("Scope", input.scope),
+		section("Out of scope", input.outOfScope),
+		section("Clarified decisions", input.decisions),
+		section("Assumptions", input.assumptions),
+		section("Open questions", input.openQuestions),
+		section("Acceptance criteria", input.acceptanceCriteria),
+		section("Edge cases", input.edgeCases),
+	].filter(Boolean);
 
-	if ((input.recommendedSplit?.filter(Boolean) ?? []).length > 0) {
-		parts.push(section("Recommended Split", input.recommendedSplit), "");
+	return [`# Plan: ${input.title}`, "", ...sections].join("\n\n").trim() + "\n";
+}
+
+function buildPlanMachineArtifactPath(planPath: string): string {
+	if (planPath.endsWith(".plan.md")) return planPath.replace(/\.plan\.md$/i, ".plan.tdd.json");
+	if (planPath.endsWith(".md")) return planPath.replace(/\.md$/i, ".plan.tdd.json");
+	return `${planPath}.plan.tdd.json`;
+}
+
+function splitPlanMarkdownSections(markdown: string): Array<{ heading?: string; content: string }> {
+	const lines = markdown.split(/\r?\n/);
+	const sections: Array<{ heading?: string; lines: string[] }> = [];
+	let current: { heading?: string; lines: string[] } = { lines: [] };
+	let inCode = false;
+
+	const pushCurrent = () => {
+		const content = current.lines.join("\n").trim();
+		if (content) sections.push({ heading: current.heading, lines: current.lines.slice() });
+	};
+
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed.startsWith("```")) inCode = !inCode;
+		const headingMatch = !inCode ? trimmed.match(/^#{1,6}\s+(.+)$/) : null;
+		if (headingMatch) {
+			pushCurrent();
+			current = { heading: headingMatch[1].trim(), lines: [] };
+			continue;
+		}
+		current.lines.push(line);
+	}
+	pushCurrent();
+
+	return sections.map((section) => ({
+		heading: section.heading,
+		content: section.lines.join("\n").trim(),
+	}));
+}
+
+function extractSectionItems(content: string): string[] {
+	const items: string[] = [];
+	for (const rawLine of content.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line) continue;
+		const bulletMatch = line.match(/^[-*+]\s+(?:\[[ xX]\]\s+)?(.+)$/);
+		if (bulletMatch) {
+			items.push(bulletMatch[1].trim());
+			continue;
+		}
+		const numberedMatch = line.match(/^\d+[.)]\s+(.+)$/);
+		if (numberedMatch) {
+			items.push(numberedMatch[1].trim());
+		}
+	}
+	if (items.length > 0) return items;
+	const paragraph = content.replace(/\s+/g, " ").trim();
+	return paragraph ? [paragraph] : [];
+}
+
+function isMetaPlanBullet(text: string): boolean {
+	const normalized = text.toLowerCase().trim();
+	if (!normalized || normalized === "(none)") return true;
+	return [
+		/the feature behavior is documented in repo-grounded terms/,
+		/the plan cites affected modules/,
+		/acceptance criteria cover the primary user-visible flow/,
+		/no obvious existing module is found/,
+		/critical behavior remains ambiguous and needs clarification/,
+		/review and update /,
+	].some((pattern) => pattern.test(normalized));
+}
+
+function isBlockingAmbiguityText(text: string): boolean {
+	const normalized = text.toLowerCase();
+	return [
+		/before implementation/,
+		/before tests can be written/,
+		/needs clarification/,
+		/cannot infer/,
+		/can't infer/,
+		/impossible to infer/,
+		/unknown seam/,
+		/unsupported seam/,
+	].some((pattern) => pattern.test(normalized));
+}
+
+function buildMachineRequirements(items: string[], sourceSection: string, prefix: string, priority: "primary" | "secondary"): PlanMachineRequirement[] {
+	let index = 0;
+	return items
+		.filter((item) => !isMetaPlanBullet(item))
+		.map((text) => ({
+			id: `${prefix}${++index}`,
+			text,
+			priority,
+			sourceSection,
+		}));
+}
+
+function buildPlanMachineArtifact(markdown: string, state: Pick<PlanningSessionState, "title" | "originalInput" | "repoContextSummary" | "relevantFiles">, planPath: string): PlanMachineArtifact {
+	const sections = splitPlanMarkdownSections(markdown);
+	const getSection = (name: string) => sections.find((section) => section.heading?.toLowerCase() === name.toLowerCase())?.content ?? "";
+	const requestedFeature = getSection("Requested feature").replace(/\s+/g, " ").trim() || state.originalInput;
+	const acceptanceCriteria = extractSectionItems(getSection("Acceptance criteria"));
+	const edgeCases = extractSectionItems(getSection("Edge cases"));
+	const decisions = extractSectionItems(getSection("Clarified decisions"));
+	const openQuestions = extractSectionItems(getSection("Open questions"));
+	const assumptions = extractSectionItems(getSection("Assumptions"));
+	const outOfScope = extractSectionItems(getSection("Out of scope")).filter((item) => !isMetaPlanBullet(item));
+
+	const behavioralRequirements = [
+		...buildMachineRequirements(acceptanceCriteria, "Acceptance criteria", "AC", "primary"),
+		...buildMachineRequirements(edgeCases, "Edge cases", "EC", "primary"),
+	];
+	const testableOperationalRequirements = buildMachineRequirements(decisions, "Clarified decisions", "OP", "secondary");
+
+	let advisoryIndex = 0;
+	let blockingIndex = 0;
+	const advisoryAmbiguities: PlanMachineAmbiguity[] = [];
+	const blockingAmbiguities: PlanMachineAmbiguity[] = [];
+	for (const text of [...openQuestions, ...assumptions].filter((item) => !isMetaPlanBullet(item))) {
+		const ambiguity = {
+			id: isBlockingAmbiguityText(text) ? `AMB${++blockingIndex}` : `AMB${++advisoryIndex}`,
+			text,
+			blocksTdd: isBlockingAmbiguityText(text),
+			sourceSection: openQuestions.includes(text) ? "Open questions" : "Assumptions",
+		};
+		if (ambiguity.blocksTdd) blockingAmbiguities.push(ambiguity);
+		else advisoryAmbiguities.push(ambiguity);
 	}
 
-	parts.push(
-		"## Requested feature",
-		input.originalInput,
-		"",
-		"## Existing codebase context",
-		input.repoContextSummary || "- (none)",
-		"",
-		"## Problem statement",
-		input.problemStatement || "TBD",
-		"",
-		section("Scope", input.scope),
-		"",
-		section("Out of scope", input.outOfScope),
-		"",
-		section("Clarified decisions", input.decisions),
-		"",
-		section("Assumptions", input.assumptions),
-		"",
-		section("Open questions", input.openQuestions),
-		"",
-		section("Acceptance criteria", input.acceptanceCriteria),
-		"",
-		section("Edge cases", input.edgeCases),
-	);
-	return parts.join("\n").trim() + "\n";
+	return {
+		version: 1,
+		generatedAt: new Date().toISOString(),
+		sourcePlanPath: planPath,
+		title: state.title,
+		requestedFeature,
+		behavioralRequirements,
+		testableOperationalRequirements,
+		blockingAmbiguities,
+		advisoryAmbiguities,
+		outOfScope,
+		repoGrounding: {
+			repoContextSummary: state.repoContextSummary,
+			relevantFiles: state.relevantFiles.map((file) => ({ path: file.path, reason: file.reason })),
+		},
+		generationConstraints: {
+			preferRepoGroundedTests: true,
+			forbidInventedApis: true,
+			preferBehavioralAssertions: true,
+		},
+	};
 }
 
 async function detectRepoRoot(ctx: { cwd: string }): Promise<string> {
@@ -819,35 +976,13 @@ async function collectPlanningContext(ctx: any, input: string): Promise<Partial<
 
 function synthesizePlanFromState(state: PlanningSessionState): string {
 	const openQuestions = state.questions.filter((question) => question.status === "open").map((question) => question.question);
-	const scope = state.relevantFiles.slice(0, 4).map((file) => `Review and update ${file.path}`);
-	const recommendedSplit = scope.length > 2
-		? [
-			"Slice 1: deliver the smallest end-to-end version of the feature for a single primary user flow.",
-			"Slice 2: add the next user-visible capability or supporting variant on top of slice 1.",
-		]
-		: undefined;
-	const acceptanceCriteria = [
-		"The feature behavior is documented in repo-grounded terms.",
-		"The plan cites affected modules or explicitly notes when no prior module exists.",
-		"Acceptance criteria cover the primary user-visible flow and at least one edge case.",
-	];
-	const edgeCases = [
-		"No obvious existing module is found for the request.",
-		"Critical behavior remains ambiguous and needs clarification before implementation.",
-	];
 	return renderPlanMarkdown({
 		title: state.title,
 		originalInput: state.originalInput,
 		repoContextSummary: state.repoContextSummary,
-		recommendedSplit,
-		problemStatement: `Add ${state.title} in a way that fits the existing repository structure and conventions.`,
-		scope,
-		outOfScope: ["Unconfirmed product changes beyond the requested feature"],
 		decisions: state.decisions,
-		assumptions: state.assumptions.length > 0 ? state.assumptions : ["Reuse existing project conventions unless clarified otherwise."],
+		assumptions: state.assumptions,
 		openQuestions,
-		acceptanceCriteria,
-		edgeCases,
 	});
 }
 
@@ -939,13 +1074,18 @@ async function savePlanningDraft(ctx: any, pi: any, state: PlanningSessionState,
 	}
 	const relativePath = requestedPath?.trim() || path.join(".pi", "plans", `${state.slug}.plan.md`);
 	const absolutePath = resolvePlanOutputPath(state.repoRoot, relativePath);
+	const machineAbsolutePath = buildPlanMachineArtifactPath(absolutePath);
 	await mkdirImpl(path.dirname(absolutePath), { recursive: true });
 	await writeFileImpl(absolutePath, draft.endsWith("\n") ? draft : `${draft}\n`, "utf8");
+	const machineArtifact = buildPlanMachineArtifact(draft, state, path.relative(state.repoRoot, absolutePath));
+	await writeFileImpl(machineAbsolutePath, JSON.stringify(machineArtifact, null, 2) + "\n", "utf8");
 	const savedPath = path.relative(state.repoRoot, absolutePath);
+	const savedMachinePath = path.relative(state.repoRoot, machineAbsolutePath);
 	const nextState: PlanningSessionState = {
 		...state,
 		currentDraft: draft,
 		savedPath,
+		savedMachinePath,
 		status: "finalized",
 		updatedAt: new Date().toISOString(),
 	};
@@ -953,11 +1093,13 @@ async function savePlanningDraft(ctx: any, pi: any, state: PlanningSessionState,
 		id: state.id,
 		slug: state.slug,
 		savedPath,
+		savedMachinePath,
 		updatedAt: nextState.updatedAt,
 	});
 	await applyPlanningState({ ...ctx, pi }, nextState);
 	await setPlanningWidget(ctx, true, true);
 	notifyUI(ctx, `Plan saved: ${savedPath}`, "info");
+	notifyUI(ctx, `TDD artifact saved: ${savedMachinePath}`, "info");
 	return nextState;
 }
 
@@ -1077,6 +1219,13 @@ export const __testables = {
 	buildPlanningSystemPrompt,
 	buildFinalizationPrompt,
 	renderPlanMarkdown,
+	buildPlanMachineArtifactPath,
+	splitPlanMarkdownSections,
+	extractSectionItems,
+	isMetaPlanBullet,
+	isBlockingAmbiguityText,
+	buildMachineRequirements,
+	buildPlanMachineArtifact,
 	resolvePlanOutputPath,
 	detectRepoRoot,
 	loadPlanningPackageJson,
@@ -1218,6 +1367,7 @@ export default function planFeatureExtension(pi: ExtensionAPI) {
 				`- open questions: ${openQuestions}`,
 				`- answered questions: ${answeredQuestions}`,
 				`- saved path: ${state.savedPath ?? "(not saved)"}`,
+				`- saved tdd artifact: ${state.savedMachinePath ?? "(not saved)"}`,
 				`- planning mode active: ${state.active ? "yes" : "no"}`,
 			].join("\n");
 			sendDisplayMessage(pi, body);
