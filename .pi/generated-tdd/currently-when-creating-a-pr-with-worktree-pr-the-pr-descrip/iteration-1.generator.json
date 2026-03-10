@@ -1,0 +1,26 @@
+{
+  "planPath": ".pi/plans/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.md",
+  "stagedOutputPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.iteration-1.ts",
+  "framework": "vitest",
+  "coveredRequirements": [
+    "worktree extension exports a PR-related command",
+    "worktree-pr retrieves git diff to build PR description",
+    "worktree-pr produces a PR description that references changed files rather than generic message",
+    "worktree-pr handles empty diff gracefully",
+    "worktree-pr inspects all files in the diff, not just a subset",
+    "worktree-pr description is not a hardcoded or trivially short placeholder"
+  ],
+  "ambiguousRequirements": [
+    "Exact format/structure of the improved PR description is unspecified — tests check for non-trivial content and file references but cannot assert exact formatting",
+    "Whether the agent uses an LLM call or local logic to generate the description is unclear — tests only verify that diff content is fetched and used",
+    "Whether the PR description should include commit messages, file summaries, or both is not specified"
+  ],
+  "notes": [
+    "Tests follow the existing node:test + node:assert/strict conventions found in the repository",
+    "The Ctx type and makeCtx helper mirror the patterns from existing worktree extension tests",
+    "Tests are designed to be RED: they assert on behavioral changes (diff inspection, meaningful PR body) that do not exist in the current implementation",
+    "Edge case for empty diff is covered to ensure graceful handling",
+    "Tests verify the implementation fetches diff data and produces non-trivial PR descriptions without testing markdown or plan file content"
+  ],
+  "generatedAt": "2026-03-10T09:36:27.361Z"
+}

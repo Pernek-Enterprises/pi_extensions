@@ -1,0 +1,100 @@
+{
+  "planPath": ".pi/plans/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.md",
+  "framework": "vitest",
+  "outputPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.iteration-1.ts",
+  "requirements": [
+    {
+      "text": "Repo root: /Users/stefanpernek/parallel/.worktrees/pi_extensions/better-pr-description-for-worktrees",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "package.json: found",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Source directories: LICENSE, README.md, __tests__, docs, extensions, package.json",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Scripts: (none detected)",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Relevant files:",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts: matches currently",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "extensions/worktree.ts: matches worktree",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Review and update extensions/worktree.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Unconfirmed product changes beyond the requested feature",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "(none)",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "Reuse existing project conventions unless clarified otherwise.",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "(none)",
+      "heading": "Open questions"
+    },
+    {
+      "text": "The feature behavior is documented in repo-grounded terms.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "The plan cites affected modules or explicitly notes when no prior module exists.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "Acceptance criteria cover the primary user-visible flow and at least one edge case.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "No obvious existing module is found for the request.",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "Critical behavior remains ambiguous and needs clarification before implementation.",
+      "heading": "Edge cases"
+    }
+  ],
+  "coveredRequirements": [
+    "worktree extension exports a PR-related command",
+    "worktree-pr retrieves git diff to build PR description",
+    "worktree-pr produces a PR description that references changed files rather than generic message",
+    "worktree-pr handles empty diff gracefully",
+    "worktree-pr inspects all files in the diff, not just a subset",
+    "worktree-pr description is not a hardcoded or trivially short placeholder"
+  ],
+  "ambiguousRequirements": [
+    "Exact format/structure of the improved PR description is unspecified — tests check for non-trivial content and file references but cannot assert exact formatting",
+    "Whether the agent uses an LLM call or local logic to generate the description is unclear — tests only verify that diff content is fetched and used",
+    "Whether the PR description should include commit messages, file summaries, or both is not specified"
+  ],
+  "notes": [
+    "Tests follow the existing node:test + node:assert/strict conventions found in the repository",
+    "The Ctx type and makeCtx helper mirror the patterns from existing worktree extension tests",
+    "Tests are designed to be RED: they assert on behavioral changes (diff inspection, meaningful PR body) that do not exist in the current implementation",
+    "Edge case for empty diff is covered to ensure graceful handling",
+    "Tests verify the implementation fetches diff data and produces non-trivial PR descriptions without testing markdown or plan file content"
+  ],
+  "generatedAt": "2026-03-10T09:36:27.362Z"
+}

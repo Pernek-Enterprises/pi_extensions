@@ -1,0 +1,172 @@
+{
+  "active": true,
+  "repoRoot": "/Users/stefanpernek/parallel/.worktrees/pi_extensions/better-pr-description-for-worktrees",
+  "planPath": ".pi/plans/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.md",
+  "slug": "currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip",
+  "loopMode": "auto-fix",
+  "status": "failed",
+  "iteration": 3,
+  "maxIterations": 4,
+  "startedAt": "2026-03-10T09:35:17.857Z",
+  "updatedAt": "2026-03-10T09:41:01.031Z",
+  "finalOutputPath": "__tests__/extensions/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.ts",
+  "assessmentIsolationMode": "isolated-single-turn",
+  "iterations": [
+    {
+      "iteration": 1,
+      "stagedOutputPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.iteration-1.ts",
+      "coveragePath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-1.coverage.json",
+      "findingsPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-1.findings.json",
+      "findingsSummaryPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-1.findings.md",
+      "generatorMetadataPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-1.generator.json",
+      "coveredRequirements": [
+        "worktree extension exports a PR-related command",
+        "worktree-pr retrieves git diff to build PR description",
+        "worktree-pr produces a PR description that references changed files rather than generic message",
+        "worktree-pr handles empty diff gracefully",
+        "worktree-pr inspects all files in the diff, not just a subset",
+        "worktree-pr description is not a hardcoded or trivially short placeholder"
+      ],
+      "ambiguousRequirements": [
+        "Exact format/structure of the improved PR description is unspecified — tests check for non-trivial content and file references but cannot assert exact formatting",
+        "Whether the agent uses an LLM call or local logic to generate the description is unclear — tests only verify that diff content is fetched and used",
+        "Whether the PR description should include commit messages, file summaries, or both is not specified"
+      ],
+      "findingCategories": [
+        "insufficient-behavioral-assertions",
+        "non-executable-or-unrealistic",
+        "missing-major-plan-coverage"
+      ],
+      "verdict": "fail",
+      "summary": "The test suite has reasonable structure and coverage ideas, but several tests have weak assertions that don't actually prove the behavioral change described in the plan. The assertions are too permissive and could pass with the current 'horrible' implementation, defeating the TDD purpose.",
+      "continueDecision": "continue"
+    },
+    {
+      "iteration": 2,
+      "stagedOutputPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.iteration-2.ts",
+      "coveragePath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-2.coverage.json",
+      "findingsPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-2.findings.json",
+      "findingsSummaryPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-2.findings.md",
+      "generatorMetadataPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/iteration-2.generator.json",
+      "coveredRequirements": [
+        "worktree-pr produces a PR description that references actual changed file paths from the diff",
+        "worktree-pr description is not a hardcoded or trivially short placeholder — body has meaningful diff-derived content",
+        "worktree-pr inspects all files in the diff — PR body references every changed file",
+        "worktree-pr handles empty diff gracefully without crashing",
+        "worktree-pr retrieves the git diff before building the PR description",
+        "Review and update extensions/worktree.ts — module is the updated target containing PR description logic",
+        "Unconfirmed product changes beyond the requested feature — no unrelated commands introduced"
+      ],
+      "ambiguousRequirements": [
+        "The feature behavior is documented in repo-grounded terms — this is a documentation/plan-quality criterion, not a testable runtime behavior; covered indirectly by verifying the feature works against the actual module",
+        "The plan cites affected modules or explicitly notes when no prior module exists — this is a plan-quality meta-requirement, not runtime behavior",
+        "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts — this file is the existing test suite; the plan scope item means ensuring tests are updated alongside the feature, which is what THIS test file accomplishes",
+        "(none) for Clarified decisions — there are no clarified decisions to test; the absence is noted",
+        "Critical behavior remains ambiguous and needs clarification before implementation — this edge case is a process concern, not a testable runtime behavior"
+      ],
+      "findingCategories": [
+        "non-executable-or-unrealistic",
+        "insufficient-behavioral-assertions",
+        "ambiguity",
+        "missing-major-plan-coverage"
+      ],
+      "verdict": "fail",
+      "summary": "Tests make strong assumptions about the internal implementation of extensions/worktree.ts (command naming, exec-based ctx interface, body extraction format) without evidence from the actual source. The tests are likely non-executable against the real module and contain fragile coupling to an assumed API.",
+      "continueDecision": "continue"
+    }
+  ],
+  "stagedOutputPath": ".pi/generated-tdd/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.iteration-2.ts",
+  "lastSummary": "Generation failed.",
+  "lastFindings": [
+    {
+      "category": "non-executable-or-unrealistic",
+      "severity": "high",
+      "title": "Tests assume a specific ctx/exec API contract with no evidence from the actual source",
+      "details": "The entire test suite constructs a fake `ctx` object with methods like `ctx.exec()`, `ctx.pi.notify()`, `ctx.persistArtifact()`, etc., and assumes the PR command handler accepts this exact shape. There is zero evidence in the repository context or plan for what the actual `extensions/worktree.ts` module exports or what API contract it uses. The `getPrHandler` function assumes `worktreeExtension.commands` is a flat object with function values keyed by command name matching /pr/i. If the real module uses a different shape (e.g., a class, a registration pattern, different method signatures), every test will fail at the `getPrHandler` step before testing any behavior.",
+      "fix": "Read the actual `extensions/worktree.ts` file to determine its real export shape and API contract. Adapt the test harness to match the actual module interface rather than guessing.",
+      "requirement": "Review and update extensions/worktree.ts",
+      "evidence": [
+        "const commands: Record<string, unknown> = (worktreeExtension as any).commands ?? worktreeExtension;",
+        "const prCmd = names.find((name) => /pr/i.test(name));",
+        "await handler(ctx);"
+      ]
+    },
+    {
+      "category": "non-executable-or-unrealistic",
+      "severity": "high",
+      "title": "extractPrBody helper assumes command is a single string containing --body with inline content",
+      "details": "The tests assume the PR command constructs a single string like `gh pr create --body '...'` and passes it to `ctx.exec()`. In practice the module might: use an array of arguments, use a temp file for the body (`--body-file`), use `ctx.exec` with separate args, or call `gh` via `spawnInteractive`. The regex-based `extractPrBody` helper would return empty string for any of these patterns, causing all body-content assertions to fail or pass vacuously.",
+      "fix": "After determining the actual implementation pattern from `extensions/worktree.ts`, adjust assertions to match how the body is actually provided to `gh pr create`.",
+      "requirement": "worktree-pr produces a PR description that references actual changed file paths from the diff",
+      "evidence": [
+        "const singleQuoteMatch = command.match(/--body\\s+'([^']*(?:''[^']*)*)'/s);",
+        "const prBody = extractPrBody(prCreateCall.command);"
+      ]
+    },
+    {
+      "category": "insufficient-behavioral-assertions",
+      "severity": "medium",
+      "title": "Empty diff test has weak assertions that pass on almost any behavior",
+      "details": "The empty-diff test catches all exceptions and only fails if there's no graceful notice AND an exception was thrown. If the handler completes normally (even if it does nothing), the test passes. The post-completion assertion checks `prCall || hasNotice` which means any exec call containing 'gh pr create' (even from a default path) satisfies it. This doesn't meaningfully verify graceful handling.",
+      "fix": "Define more specific expected behavior for empty diffs: e.g., assert a specific warning message is emitted, or assert that no PR is created, or assert a specific error message. Pick one and assert it clearly.",
+      "requirement": "worktree-pr handles empty diff gracefully without crashing",
+      "evidence": [
+        "if (!hasGracefulNotice) { threwUnexpected = true; }",
+        "assert.ok(prCall || hasNotice, \"On empty diff, should either create a PR or emit a notice informing the user\");"
+      ]
+    },
+    {
+      "category": "ambiguity",
+      "severity": "medium",
+      "title": "Plan is too vague to derive testable behavioral requirements",
+      "details": "The plan's acceptance criteria are meta-requirements about documentation quality ('The feature behavior is documented in repo-grounded terms', 'The plan cites affected modules'). The actual behavioral requirement is simply 'improve PR descriptions to reference diff files', but there's no specification of the exact mechanism. The tests invent specific behavioral contracts (file paths in --body flag, minimum 50 char body, etc.) that may not match the implementation approach.",
+      "fix": "Acknowledge in findings that the plan lacks concrete behavioral specifications. At minimum, inspect the current `extensions/worktree.ts` source to understand the existing PR creation flow and write tests against that baseline.",
+      "requirement": "The feature behavior is documented in repo-grounded terms"
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "evidence": [
+        "section: Scope"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: (none)",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "(none)",
+      "evidence": [
+        "section: Clarified decisions"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: The feature behavior is documented in repo-grounded terms.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "The feature behavior is documented in repo-grounded terms.",
+      "evidence": [
+        "section: Acceptance criteria"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: The plan cites affected modules or explicitly notes when no prior module exists.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "The plan cites affected modules or explicitly notes when no prior module exists.",
+      "evidence": [
+        "section: Acceptance criteria"
+      ]
+    }
+  ],
+  "stopReason": "generation-failed"
+}
