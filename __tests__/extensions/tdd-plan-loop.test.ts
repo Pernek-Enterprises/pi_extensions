@@ -319,6 +319,48 @@ test("renderAssessmentSummary produces a concise human-readable review report", 
 	assert.match(summary, /Add explicit pause\/resume behavior tests/);
 });
 
+test("hasBlockingFindings returns true when any finding has high severity", () => {
+	assert.equal(
+		__testables.hasBlockingFindings({
+			verdict: "fail",
+			summary: "Issues found.",
+			findings: [
+				{ category: "superficial-source-tests", severity: "high", title: "Bad test", details: "Details", fix: "Fix it" },
+				{ category: "other", severity: "low", title: "Minor issue", details: "Details", fix: "Fix it" },
+			],
+			strengths: [],
+		}),
+		true,
+	);
+});
+
+test("hasBlockingFindings returns false when all findings are low or medium severity", () => {
+	assert.equal(
+		__testables.hasBlockingFindings({
+			verdict: "fail",
+			summary: "Minor issues.",
+			findings: [
+				{ category: "other", severity: "low", title: "Minor issue", details: "Details", fix: "Fix it" },
+				{ category: "other", severity: "medium", title: "Medium issue", details: "Details", fix: "Fix it" },
+			],
+			strengths: [],
+		}),
+		false,
+	);
+});
+
+test("hasBlockingFindings returns false when there are no findings", () => {
+	assert.equal(
+		__testables.hasBlockingFindings({
+			verdict: "pass",
+			summary: "All good.",
+			findings: [],
+			strengths: [],
+		}),
+		false,
+	);
+});
+
 test("extension registers tdd-plan, tdd-plan-loop, and tdd-plan-status commands", () => {
 	const commands = new Set<string>();
 	tddPlanExtension({
