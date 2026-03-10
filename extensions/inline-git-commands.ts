@@ -269,7 +269,7 @@ async function gitPrUpdate(ctx: Ctx) {
 
 // --- Extension registration ---
 
-function inlineGitExtension(pi?: PiApi) {
+export default function inlineGitExtension(pi: PiApi) {
 	const commands: Array<{ name: string; handler: (ctx: Ctx, ...args: unknown[]) => Promise<void> }> = [
 		{ name: "git-status", handler: gitStatus },
 		{ name: "git-diff", handler: gitDiff as (ctx: Ctx, ...args: unknown[]) => Promise<void> },
@@ -282,8 +282,11 @@ function inlineGitExtension(pi?: PiApi) {
 	];
 
 	for (const cmd of commands) {
-		pi?.registerCommand?.(cmd.name, cmd.handler);
+		pi?.registerCommand?.(cmd.name, {
+			description: `Git command /${cmd.name}`,
+			handler: async (args: string, ctx: Ctx) => {
+				await cmd.handler(ctx, args?.trim());
+			},
+		});
 	}
 }
-
-export default inlineGitExtension;

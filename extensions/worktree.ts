@@ -982,28 +982,22 @@ const commandHandlers: Record<string, (ctx: Ctx, ...args: string[]) => Promise<u
 	"worktree-cleanup": async (ctx: Ctx, slug?: string) => await handleWorktreeCleanupInteractive(ctx, slug),
 };
 
-const worktreeExtension = {
-	name: "worktree",
-	commands: commandHandlers,
-	init(pi?: PiApi) {
-		runtimePi = pi;
-		const registrations = [
-			{ name: "worktree-start", hasArgs: true },
-			{ name: "worktree-pr", hasArgs: false },
-			{ name: "worktree-main", hasArgs: false },
-			{ name: "worktree-cleanup", hasArgs: true },
-		] as const;
-		for (const reg of registrations) {
-			pi?.registerCommand?.(reg.name, {
-				description: `Managed git worktree command /${reg.name}`,
-				handler: async (args, ctx) => {
-					const trimmedArgs = args?.trim();
-					if (reg.hasArgs) return await commandHandlers[reg.name](ctx, trimmedArgs);
-					return await commandHandlers[reg.name](ctx);
-				},
-			});
-		}
-	},
-};
-
-export default worktreeExtension;
+export default function worktreeExtension(pi: PiApi) {
+	runtimePi = pi;
+	const registrations = [
+		{ name: "worktree-start", hasArgs: true },
+		{ name: "worktree-pr", hasArgs: false },
+		{ name: "worktree-main", hasArgs: false },
+		{ name: "worktree-cleanup", hasArgs: true },
+	] as const;
+	for (const reg of registrations) {
+		pi?.registerCommand?.(reg.name, {
+			description: `Managed git worktree command /${reg.name}`,
+			handler: async (args: string, ctx: Ctx) => {
+				const trimmedArgs = args?.trim();
+				if (reg.hasArgs) return await commandHandlers[reg.name](ctx, trimmedArgs);
+				return await commandHandlers[reg.name](ctx);
+			},
+		});
+	}
+}
