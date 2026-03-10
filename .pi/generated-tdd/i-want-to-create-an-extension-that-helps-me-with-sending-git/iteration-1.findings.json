@@ -1,0 +1,92 @@
+{
+  "verdict": "fail",
+  "summary": "The test suite provides comprehensive behavioral coverage of all plan requirements, edge cases, and acceptance criteria. Tests are well-structured with realistic mocks, strong behavioral assertions, and clear mapping to requirements. Minor issues exist but none are blocking.",
+  "findings": [
+    {
+      "category": "ambiguity",
+      "severity": "low",
+      "title": "Command discovery heuristics may not match actual extension pattern",
+      "details": "The tests use two discovery mechanisms (collectRegisteredCommands and findCommand) to handle unknown extension shape. The plan clearly states the extension follows worktree.ts pattern using pi.registerCommand(), but the collectRegisteredCommands helper passes a mockPi object and tries calling the extension as a function or via init/setup/default methods. If the actual extension uses a different registration pattern (e.g., the extension function receives a different argument shape), all tests will fail at the handler lookup step rather than at the behavioral assertion.",
+      "fix": "This is acceptable for TDD since the tests define the expected contract. No change needed unless the actual worktree.ts pattern is significantly different from what's assumed. Consider adding a comment noting the expected registration pattern based on worktree.ts.",
+      "requirement": "Extension loads via the existing discovery",
+      "evidence": [
+        "collectRegisteredCommands function tries ext as function, ext.init, ext.setup, ext.default"
+      ]
+    },
+    {
+      "category": "insufficient-behavioral-assertions",
+      "severity": "low",
+      "title": "git-commit interactive prompt test doesn't verify the prompted message is used in commit",
+      "details": "The '/git-commit without a message argument prompts for one interactively' test verifies that ctx.ui.input() is called but does not assert that the returned message ('prompted message') actually appears in the git commit command.",
+      "fix": "Add an assertion checking that the git commit exec call includes the prompted message string: assert.ok(ctx.execCalls.find(c => c.command.includes('git commit') && c.command.includes('prompted message')), 'must use the interactively provided message in the commit')",
+      "requirement": "/git-commit without message prompts interactively",
+      "evidence": [
+        "ctx.ui.input = async (_prompt: string) => { inputCalled = true; return 'prompted message'; };"
+      ]
+    },
+    {
+      "category": "other",
+      "severity": "low",
+      "title": "Test uses node:test but generator metadata says vitest",
+      "details": "Generator metadata specifies framework as 'vitest' but the actual generated tests use 'node:test' and 'node:assert/strict'. The generator notes say this matches local conventions. This is fine for execution but creates a metadata inconsistency.",
+      "fix": "No code change needed — the tests correctly follow the repository's existing test conventions (node:test). The metadata should ideally be corrected but this doesn't affect test quality.",
+      "evidence": [
+        "import test from 'node:test';",
+        "import assert from 'node:assert/strict';"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: `/git-status` — show `git status --short`, notify result",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "`/git-status` — show `git status --short`, notify result",
+      "evidence": [
+        "section: Scope"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: `/git-checkout <branch>` — switch branch; interactive picker via `ctx.ui.select()` when no argument given; prompt to stash on dirty tree",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "`/git-checkout <branch>` — switch branch; interactive picker via `ctx.ui.select()` when no argument given; prompt to stash on dirty tree",
+      "evidence": [
+        "section: Scope"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: `/git-pr-update` — push current branch, update existing PR (or notify if none exists)",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "`/git-pr-update` — push current branch, update existing PR (or notify if none exists)",
+      "evidence": [
+        "section: Scope"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: Worktree integration (handled by `extensions/worktree.ts`)",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "Worktree integration (handled by `extensions/worktree.ts`)",
+      "evidence": [
+        "section: Out of scope"
+      ]
+    }
+  ],
+  "strengths": [
+    "Excellent coverage of all 8 slash commands with both happy path and edge case scenarios",
+    "Strong behavioral assertions that verify exec calls, notification content, and UI interaction patterns",
+    "Good mock design with pattern-matching exec responses that allow flexible command matching",
+    "Edge cases are well-covered: dirty tree stashing, stash pop conflicts, already-on-main, no-upstream push, PR-from-main refusal, nothing-to-commit",
+    "Branch picker test properly verifies remotes/origin/ prefix stripping requirement",
+    "Tests correctly verify both positive and negative conditions (e.g., must NOT create PR when already exists, must NOT checkout when already on main)",
+    "Clear requirement traceability via test names and comments"
+  ]
+}

@@ -1,0 +1,224 @@
+{
+  "planPath": ".pi/plans/i-want-to-create-an-extension-that-helps-me-with-sending-git.plan.md",
+  "framework": "vitest",
+  "outputPath": ".pi/generated-tdd/i-want-to-create-an-extension-that-helps-me-with-sending-git/i-want-to-create-an-extension-that-helps-me-with-sending-git.plan.test.iteration-1.ts",
+  "requirements": [
+    {
+      "text": "`extensions/worktree.ts` establishes the pattern: individual `pi.registerCommand()` calls, shell via `pi.exec(\"bash\", [\"-lc\", cmd])`, user feedback via `ctx.ui?.notify()`, confirmation via `ctx.ui.confirm()`, selection via `ctx.ui.select()`",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "PR creation logic already exists in `handleWorktreePr()` (uses `gh pr create`, `gh pr view`) — the new extension needs a simpler, non-worktree-aware version",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Package uses `\"type\": \"module\"` with peer deps on `@mariozechner/pi-coding-agent` and `@mariozechner/pi-ai`",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "`/git-status` — show `git status --short`, notify result",
+      "heading": "Scope"
+    },
+    {
+      "text": "`/git-diff` — show truncated diff (staged + unstaged); optional path argument",
+      "heading": "Scope"
+    },
+    {
+      "text": "`/git-checkout <branch>` — switch branch; interactive picker via `ctx.ui.select()` when no argument given; prompt to stash on dirty tree",
+      "heading": "Scope"
+    },
+    {
+      "text": "`/git-create-branch <slug>` — create and checkout new branch",
+      "heading": "Scope"
+    },
+    {
+      "text": "`/git-remote-main` — `git checkout main && git pull origin main`; prompt to stash on dirty tree",
+      "heading": "Scope"
+    },
+    {
+      "text": "`/git-commit <message>` — stage all + commit; if no message argument, prompt via `ctx.ui.input()`",
+      "heading": "Scope"
+    },
+    {
+      "text": "`/git-pr` — create PR via `gh pr create` against main; detect existing PR and update instead",
+      "heading": "Scope"
+    },
+    {
+      "text": "`/git-pr-update` — push current branch, update existing PR (or notify if none exists)",
+      "heading": "Scope"
+    },
+    {
+      "text": "Worktree integration (handled by `extensions/worktree.ts`)",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "Rebase / merge conflict resolution",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "Git log browsing",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "Multi-remote support (assumes `origin`)",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "Stash management beyond auto-stash-before-checkout",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "**Individual commands**, not a single `/git` dispatcher — matches worktree extension pattern and allows multi-step orchestration per command",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "**Interactive branch picker** when `/git-checkout` is called without arguments — uses `ctx.ui.select()` with output of `git branch -a`, strips `remotes/origin/` prefixes for display",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "**Dirty working tree** on checkout/remote-main: prompt user via `ctx.ui.confirm()`, auto-stash if confirmed, auto-unstash after checkout",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "**`/git-remote-main`** does exactly `checkout main && pull origin main` — no worktree metadata interaction",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "**PR commands** use `gh` CLI — `ensureGhAuthenticated()` check before PR operations; always target `main` as base branch",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "**Commit** stages all changes (`git add -A`) before committing — matches the worktree extension's commit behavior",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "**Duplicate utilities** (`trimOutput`, `shQuote`, `detectRepoRoot`, `ensureGhAuthenticated`) — inline in the new file, no shared module",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "**Diff truncation** — truncate large diff output in notifications",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "`origin` is the single relevant remote",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "`main` is the default branch name",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "`gh` CLI is available and authenticated for PR commands",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "Notify-level feedback is sufficient for command results",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "Each command runs from a pi session without dropping to shell",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "`/git-checkout` without arguments shows an interactive branch picker",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "`/git-checkout` and `/git-remote-main` prompt the user when working tree is dirty, stash automatically if confirmed",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "`/git-commit` without a message argument prompts for one interactively",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "`/git-pr` creates a new PR or detects an existing one; `/git-pr-update` pushes and reports the PR URL",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "All commands notify success/failure via `ctx.ui.notify()`",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "Extension loads via the existing `\"pi\": { \"extensions\": [\"./extensions\"] }` discovery",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "`/git-checkout` on a remote-only branch (auto-track via `git checkout <branch>`)",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "`/git-remote-main` when already on main (skip checkout, just pull)",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "`/git-commit` with no changes (notify \"nothing to commit\")",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "`/git-pr` when on main (refuse with helpful message)",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "`/git-pr` when branch has no upstream (push with `-u origin <branch>` first)",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "Stash pop conflict after checkout (notify error, leave stash intact)",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "**Slice 1 — Navigation**: `/git-status`, `/git-checkout` (with picker + stash prompt), `/git-create-branch`, `/git-remote-main`",
+      "heading": "Recommended Split"
+    },
+    {
+      "text": "**Slice 2 — Changes**: `/git-diff`, `/git-commit`",
+      "heading": "Recommended Split"
+    },
+    {
+      "text": "**Slice 3 — PR workflow**: `/git-pr`, `/git-pr-update`",
+      "heading": "Recommended Split"
+    }
+  ],
+  "coveredRequirements": [
+    "Extension exports a valid module (req 30)",
+    "Individual slash commands registered, not single dispatcher (req 16)",
+    "/git-status runs git status --short and notifies (req 3)",
+    "/git-diff shows truncated diff (req 4, 23)",
+    "/git-diff accepts optional path argument (req 4)",
+    "/git-checkout without arguments shows interactive branch picker (req 5, 25)",
+    "/git-checkout with argument switches directly (req 5)",
+    "/git-checkout on dirty tree prompts stash, auto-stash/unstash (req 18, 26)",
+    "/git-create-branch creates and checks out new branch (req 6)",
+    "/git-remote-main checks out main and pulls (req 7, 19)",
+    "/git-remote-main prompts to stash on dirty tree (req 26)",
+    "/git-remote-main when already on main skips checkout (req 32)",
+    "/git-commit stages all and commits with message (req 8, 21)",
+    "/git-commit without message prompts interactively (req 27)",
+    "/git-commit with no changes notifies nothing to commit (req 33)",
+    "/git-pr creates PR via gh pr create against main (req 9, 20)",
+    "/git-pr detects existing PR and updates instead (req 9, 28)",
+    "/git-pr on main refuses with helpful message (req 34)",
+    "/git-pr pushes with -u when no upstream (req 35)",
+    "/git-pr-update pushes and reports PR URL (req 10, 28)",
+    "/git-pr-update notifies when no PR exists (req 10)",
+    "PR commands check gh authentication (req 20)",
+    "All commands notify success/failure (req 29)",
+    "/git-checkout auto-tracks remote-only branch (req 31)",
+    "Stash pop conflict notifies error and leaves stash intact (req 36)",
+    "Branch picker strips remotes/origin/ prefixes (req 17)"
+  ],
+  "ambiguousRequirements": [
+    "Req 22: Utility functions (trimOutput, shQuote, detectRepoRoot, ensureGhAuthenticated) are inlined — cannot test isolation without knowing export structure; tested indirectly via behavior",
+    "Req 24: 'runs from a pi session without dropping to shell' is architectural; tested indirectly by verifying commands use ctx.exec rather than child_process directly",
+    "Req 23: Exact diff truncation threshold is unspecified; test only asserts output is shorter than raw diff"
+  ],
+  "notes": [
+    "Tests use node:test and node:assert/strict matching local conventions exactly (see all existing examples)",
+    "Extension is imported from extensions/inline-git-commands.ts — the expected file path based on the plan",
+    "Two approaches for discovering commands: collectRegisteredCommands (pi.registerCommand pattern like worktree.ts) and findCommand (object-style export); tests try both",
+    "ctx mock provides exec with pattern-matching response map, ui.select/confirm/input/notify, and pi.notify/warn/error to cover both possible notification APIs",
+    "All tests are RED: they will fail until extensions/inline-git-commands.ts is implemented with the correct command registrations and behavior"
+  ],
+  "generatedAt": "2026-03-10T11:01:31.228Z"
+}
