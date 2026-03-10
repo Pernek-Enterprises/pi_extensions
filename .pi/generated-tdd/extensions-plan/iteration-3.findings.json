@@ -1,0 +1,104 @@
+{
+  "verdict": "fail",
+  "summary": "The test suite has strong behavioral coverage of the planned interactive worktree-cleanup feature, but contains critical issues: the ui.custom mock calls done() twice (race condition), the Ctx type and mock shape are heavily assumed without repo evidence, and file-existence checks for sibling test files are fragile non-behavioral tests.",
+  "findings": [
+    {
+      "category": "non-executable-or-unrealistic",
+      "severity": "high",
+      "title": "ui.custom mock calls done() twice, causing unpredictable behavior",
+      "details": "In the main interactive test and the multi-select test, the mock does `renderer(..., done); done([\"feat-a\"] as unknown as T);`. The comment says 'If renderer does not call done internally, call it ourselves' but there is no guard — done() is always called after renderer(). If the implementation calls done() inside the renderer callback (which is the expected flow), the Promise resolves twice. The first resolve wins but the second done() call still executes, and if it triggers side effects it leads to flaky or incorrect test results. The generator notes claim 'The done callback is now called synchronously exactly once' but the code clearly calls it unconditionally after renderer().",
+      "fix": "Remove the unconditional `done(...)` call after `renderer()`. Instead, have the renderer mock itself call done() — e.g., pass a custom renderer function that immediately invokes `done(['feat-a'])` without also calling it outside. Alternatively, track whether done was already called and only call it once.",
+      "requirement": "Currently worktree cleanup needs the exact worktree slug to cleanup the worktree. I want to add the option that one can simply send /worktree-cleanup and then as a followup can select which worktrees should be cleaned up.",
+      "evidence": [
+        "renderer({ stop: () => {}, start: () => {}, requestRender: () => {} }, {}, {}, done);",
+        "done([\"feat-a\"] as unknown as T);"
+      ]
+    },
+    {
+      "category": "non-executable-or-unrealistic",
+      "severity": "high",
+      "title": "Ctx type and command handler signature are entirely assumed with no repo evidence",
+      "details": "The entire Ctx type, the extension shape ({ commands: Record<string, CommandHandler> }), the ui.custom API signature, and the command handler signature `(ctx: Ctx, ...args: string[])` are all inferred without any evidence from the actual extensions/worktree.ts file. The test imports `worktreeExtension` from '../../extensions/worktree.ts' and immediately casts it. If the actual module uses a different export shape (e.g., named exports, a registration function, different command names, or a different context API), every single behavioral test will fail at runtime for the wrong reason. The generator metadata acknowledges this but doesn't mitigate it.",
+      "fix": "Examine the actual extensions/worktree.ts source to verify the export shape and command handler signature. If the source cannot be inspected, add a dedicated structural smoke test that logs the actual export shape and fails with a descriptive message showing what was found, so the first failure is diagnostic rather than cryptic.",
+      "requirement": "Add Extensions in a way that fits the existing repository structure and conventions.",
+      "evidence": [
+        "const ext = worktreeExtension as { commands?: Record<string, CommandHandler> };",
+        "NOTE: The context shape (Ctx) and ui.custom renderer API are inferred from existing test examples"
+      ]
+    },
+    {
+      "category": "superficial-source-tests",
+      "severity": "medium",
+      "title": "File-existence checks for sibling test files are non-behavioral and fragile",
+      "details": "Three tests use `existsSync` to check that sibling test files exist on disk. These are not behavioral tests — they verify filesystem layout, not feature behavior. They will break if files are renamed or moved, and they don't validate any requirement from the plan. The plan says 'Review and update' those files, but checking their existence doesn't verify they were reviewed or updated.",
+      "fix": "Remove the three file-existence tests ('scoped test file for worktree extension plan exists on disk', 'scoped tdd-plan test file exists on disk', 'scoped plan-feature-spec test file exists on disk'). They add no behavioral value. If scope verification is needed, it belongs in a CI lint step, not in feature tests.",
+      "requirement": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "evidence": [
+        "assert.ok(existsSync(filePath), `Expected scoped test file to exist at ${filePath}`)"
+      ]
+    },
+    {
+      "category": "ambiguity",
+      "severity": "medium",
+      "title": "Test uses node:test but generator metadata says vitest framework",
+      "details": "The generator metadata declares `\"framework\": \"vitest\"` but the generated tests use `import test from 'node:test'` and `import assert from 'node:assert/strict'`, which is the Node.js built-in test runner. This mismatch could cause execution issues if the CI/test runner expects vitest syntax (describe/it/expect) or vitest configuration.",
+      "fix": "Align the test runner with what the repository actually uses. Check if the repo has a vitest config or if existing tests use node:test. Use the correct runner consistently. If node:test is correct, update the generator metadata; if vitest is correct, rewrite tests to use vitest's API.",
+      "evidence": [
+        "\"framework\": \"vitest\"",
+        "import test from \"node:test\";",
+        "import assert from \"node:assert/strict\";"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: (none)",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "(none)",
+      "evidence": [
+        "section: Clarified decisions"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: The feature behavior is documented in repo-grounded terms.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "The feature behavior is documented in repo-grounded terms.",
+      "evidence": [
+        "section: Acceptance criteria"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: No obvious existing module is found for the request.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "No obvious existing module is found for the request.",
+      "evidence": [
+        "section: Edge cases"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: Critical behavior remains ambiguous and needs clarification before implementation.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "Critical behavior remains ambiguous and needs clarification before implementation.",
+      "evidence": [
+        "section: Edge cases"
+      ]
+    }
+  ],
+  "strengths": [
+    "Good coverage of the primary user flow (no-args → list → select → remove)",
+    "Tests multi-select, empty selection, no-worktrees-available, and git failure edge cases",
+    "Backward compatibility test for explicit slug argument",
+    "Out-of-scope guard test checking that no unrelated commands are added",
+    "Clear, descriptive test names that map to plan requirements"
+  ]
+}

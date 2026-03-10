@@ -1,0 +1,138 @@
+{
+  "planPath": ".pi/plans/extensions.plan.md",
+  "framework": "vitest",
+  "outputPath": ".pi/generated-tdd/extensions-plan/extensions-plan.plan.test.iteration-1.ts",
+  "requirements": [
+    {
+      "text": "Slice 1: deliver the smallest end-to-end version of the feature for a single primary user flow.",
+      "heading": "Recommended Split"
+    },
+    {
+      "text": "Slice 2: add the next user-visible capability or supporting variant on top of slice 1.",
+      "heading": "Recommended Split"
+    },
+    {
+      "text": "Repo root: /Users/stefanpernek/parallel/.worktrees/pi_extensions/improve-worktree-cleanup",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "package.json: found",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Source directories: LICENSE, README.md, __tests__, docs, extensions, package.json",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Scripts: (none detected)",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Relevant files:",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts: matches currently, extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/tdd-plan.test.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "extensions/worktree.ts: matches worktree, extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/plan-feature-spec.plan.test.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "__tests__/extensions/tdd-plan-loop.test.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "extensions/tdd-plan.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "extensions/plan-feature.ts: matches extensions, extension",
+      "heading": "Existing codebase context"
+    },
+    {
+      "text": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Review and update __tests__/extensions/tdd-plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Review and update extensions/worktree.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Review and update __tests__/extensions/plan-feature-spec.plan.test.ts",
+      "heading": "Scope"
+    },
+    {
+      "text": "Unconfirmed product changes beyond the requested feature",
+      "heading": "Out of scope"
+    },
+    {
+      "text": "(none)",
+      "heading": "Clarified decisions"
+    },
+    {
+      "text": "Reuse existing project conventions unless clarified otherwise.",
+      "heading": "Assumptions"
+    },
+    {
+      "text": "(none)",
+      "heading": "Open questions"
+    },
+    {
+      "text": "The feature behavior is documented in repo-grounded terms.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "The plan cites affected modules or explicitly notes when no prior module exists.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "Acceptance criteria cover the primary user-visible flow and at least one edge case.",
+      "heading": "Acceptance criteria"
+    },
+    {
+      "text": "No obvious existing module is found for the request.",
+      "heading": "Edge cases"
+    },
+    {
+      "text": "Critical behavior remains ambiguous and needs clarification before implementation.",
+      "heading": "Edge cases"
+    }
+  ],
+  "coveredRequirements": [
+    "worktree-cleanup without args lists available worktrees via git and presents interactive selection",
+    "worktree-cleanup with an explicit slug argument cleans up that specific worktree without interactive selection (backward compat)",
+    "worktree-cleanup when no extra worktrees exist notifies the user and does not show selector",
+    "worktree-cleanup interactive mode allows selecting multiple worktrees",
+    "worktree-cleanup handles git worktree list failure gracefully",
+    "worktree extension fits repository structure conventions (name, commands shape)"
+  ],
+  "ambiguousRequirements": [
+    "Exact UI widget type for multi-select (the plan says 'pi inline thingy' referencing /ss command but does not specify the exact API contract for multi-select vs single-select)",
+    "Whether the main/current branch worktree should be excluded from the selection list or just not auto-selected",
+    "Whether cleanup means 'git worktree remove' alone or also involves branch deletion"
+  ],
+  "notes": [
+    "Tests use node:test + node:assert/strict to match all existing test examples in the repo.",
+    "Tests import worktreeExtension from ../../extensions/worktree.ts matching the existing import pattern.",
+    "The Ctx type and makeCtx helper mirror the pattern from the existing worktree test file (example 1).",
+    "All tests are behavioral: they exercise the actual worktree extension command handler, not markdown content.",
+    "Tests are designed to be RED: they will fail until the interactive selection feature is implemented in extensions/worktree.ts.",
+    "The backward-compatibility test ensures the existing slug-based cleanup still works after the new feature is added.",
+    "Edge cases cover: no worktrees to clean, git failure, and the structural convention check."
+  ],
+  "generatedAt": "2026-03-10T10:58:46.748Z"
+}

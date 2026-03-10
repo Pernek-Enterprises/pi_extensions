@@ -1,0 +1,102 @@
+{
+  "verdict": "fail",
+  "summary": "The test suite has solid behavioral coverage of the core feature (interactive worktree cleanup), but has critical issues with the interactive selection mock pattern that makes tests unreliable, and includes import smoke tests that will likely fail at test execution time.",
+  "findings": [
+    {
+      "category": "non-executable-or-unrealistic",
+      "severity": "high",
+      "title": "Interactive selection mock has a race condition between renderer done() and setTimeout fallback",
+      "details": "In the single-select and multi-select tests, the ui.custom mock calls renderer() synchronously and then sets a setTimeout fallback at 50ms. The renderer receives a `done` callback. If the actual implementation calls `done()` internally, the promise resolves twice (once via done, once via setTimeout). If it doesn't call done, the test relies on a 50ms timeout which is fragile and may resolve with a value the implementation never sees. The pattern `renderer(..., done); setTimeout(() => resolve(...), 50)` means the done callback and the timeout compete. This could cause flaky behavior or mask real bugs.",
+      "fix": "Remove the setTimeout fallback. Instead, have the renderer mock immediately call `done(['feat-a'])` (or the multi-select equivalent) synchronously after the renderer is invoked, simulating the user making a selection. For example: `renderer(tui, {}, {}, done); done(['feat-a'] as unknown as T);` — but only call done once. Alternatively, just call done inside the renderer callback directly.",
+      "requirement": "Currently worktree cleanup needs the exact worktree slug to cleanup the worktree. I want to add the option that one can simply send /worktree-cleanup and then as a followup can select which worktrees should be cleaned up.",
+      "evidence": [
+        "renderer({ stop: () => {}, start: () => {}, requestRender: () => {} }, {}, {}, ((selection: unknown) => resolve(selection as T)) as (result: T) => void);",
+        "setTimeout(() => resolve([\"feat-a\"] as unknown as T), 50);"
+      ]
+    },
+    {
+      "category": "non-executable-or-unrealistic",
+      "severity": "high",
+      "title": "Import smoke tests for sibling test files will likely fail or cause side effects",
+      "details": "The tests dynamically import `./currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts`, `./tdd-plan.test.ts`, and `./plan-feature-spec.plan.test.ts`. These are test files themselves that use `node:test` and register test cases. Importing them will execute their test registrations and potentially their test bodies, causing unpredictable side effects, failures, or duplicate test runs. This is not a valid way to verify these files remain 'importable'.",
+      "fix": "Remove these three import smoke tests entirely. They test a documentation-level requirement ('review and update') that cannot be meaningfully verified at runtime. If file existence is important, use `fs.existsSync` instead of dynamic import.",
+      "requirement": "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts",
+      "evidence": [
+        "const mod = await import(\"./currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts\");",
+        "const mod = await import(\"./tdd-plan.test.ts\");",
+        "const mod = await import(\"./plan-feature-spec.plan.test.ts\");"
+      ]
+    },
+    {
+      "category": "ambiguity",
+      "severity": "medium",
+      "title": "Tests assume specific ctx shape (ui.custom, args, etc.) without evidence from source",
+      "details": "The Ctx type and the way the handler is invoked (`cleanupCmd(ctx)` and `cleanupCmd(ctx, 'feat-a')`) are entirely assumed. We don't know the actual signature of the command handler or the context shape from the plan or repo evidence. The test mocks `ctx.ui.custom` with a specific renderer signature, `ctx.args`, `ctx.exec`, etc. If the actual implementation uses a different context API (e.g., `ctx.prompt()` for selection, or a different UI helper), all behavioral tests will need rewriting.",
+      "fix": "Add a note in the test file acknowledging the assumed context shape. If possible, inspect the existing extensions/worktree.ts source to verify the handler signature and context API. If the plan mentions the /ss command pattern from ~/.pi/agent/extensions, consider examining that for the actual UI API pattern.",
+      "requirement": "Add Extensions in a way that fits the existing repository structure and conventions.",
+      "evidence": [
+        "The plan says: '(With a pi inline thingy where once can select options and send it back). (We have that for example in the /ss command found in ~/.pi/agent/extensions'"
+      ]
+    },
+    {
+      "category": "insufficient-behavioral-assertions",
+      "severity": "low",
+      "title": "User cancellation / empty selection edge case not tested",
+      "details": "There is no test for the scenario where the user opens the interactive selector but cancels without selecting anything (e.g., done([]) or done(undefined)). This is an important edge case for an interactive selection feature.",
+      "fix": "Add a test where ui.custom resolves with an empty array or undefined, and assert that no 'git worktree remove' commands are executed and an appropriate notification is shown.",
+      "requirement": "Acceptance criteria cover the primary user-visible flow and at least one edge case."
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: (none)",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "(none)",
+      "evidence": [
+        "section: Clarified decisions"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: The plan cites affected modules or explicitly notes when no prior module exists.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "The plan cites affected modules or explicitly notes when no prior module exists.",
+      "evidence": [
+        "section: Acceptance criteria"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: No obvious existing module is found for the request.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "No obvious existing module is found for the request.",
+      "evidence": [
+        "section: Edge cases"
+      ]
+    },
+    {
+      "category": "missing-major-plan-coverage",
+      "severity": "medium",
+      "title": "Missing major behavioral requirement",
+      "details": "No generated coverage entry clearly maps to: Critical behavior remains ambiguous and needs clarification before implementation.",
+      "fix": "Add an explicit behavioral test for this requirement or explain why it cannot be tested realistically.",
+      "requirement": "Critical behavior remains ambiguous and needs clarification before implementation.",
+      "evidence": [
+        "section: Edge cases"
+      ]
+    }
+  ],
+  "strengths": [
+    "Good structural tests verifying the extension exports the expected shape and 'worktree-cleanup' command",
+    "Covers the core user flow: no-args interactive selection, explicit slug backward compatibility, multi-select",
+    "Edge cases for no worktrees available and git failure are included",
+    "Uses node:test matching actual project conventions instead of vitest",
+    "Out-of-scope guard test preventing unrelated commands is a nice touch",
+    "The getCleanupCommand() helper provides clear error messages if the command is missing"
+  ]
+}
