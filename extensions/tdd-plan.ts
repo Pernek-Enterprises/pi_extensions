@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
 import { BorderedLoader, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 
 type TestFramework = "vitest" | "jest" | "unknown";
 type LoopMode = "ask-each-round" | "auto-fix";
@@ -1312,14 +1313,26 @@ async function setLoopWidget(ctx: any, state?: TddLoopState): Promise<void> {
 		}
 		return;
 	}
-	const lines = [
+	const message = [
 		`TDD loop active (${state.iteration}/${state.maxIterations})`,
 		`${state.loopMode} · ${state.status}`,
 		state.lastSummary ? state.lastSummary.slice(0, 100) : `plan: ${state.slug}`,
-	];
+	].join("\n");
 	if (typeof ctx.ui.setWidget === "function") {
-		if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(TDD_LOOP_WIDGET_ID, lines);
-		else ctx.ui.setWidget(lines.join("\n"));
+		const renderer = (_tui: any, theme: any) => {
+			const colored = theme && typeof theme.fg === "function" ? theme.fg("warning", message) : message;
+			const textComponent = new Text(colored, 0, 0);
+			return {
+				render(width: number) {
+					return textComponent.render(width);
+				},
+				invalidate() {
+					textComponent.invalidate();
+				},
+			};
+		};
+		if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(TDD_LOOP_WIDGET_ID, renderer);
+		else ctx.ui.setWidget(renderer);
 	}
 }
 

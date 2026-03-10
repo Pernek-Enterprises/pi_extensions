@@ -6,6 +6,7 @@ import {
 	type EditorTheme,
 	Key,
 	matchesKey,
+	Text,
 	truncateToWidth,
 	type TUI,
 	visibleWidth,
@@ -223,8 +224,20 @@ async function setPlanningWidget(ctx: any, active: boolean, draftReady: boolean)
 	}
 
 	if (typeof ctx.ui.setWidget === "function") {
-		if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(PLANNING_WIDGET_ID, [text]);
-		else ctx.ui.setWidget(text);
+		const renderer = (_tui: any, theme: any) => {
+			const message = theme && typeof theme.fg === "function" ? theme.fg("warning", text) : text;
+			const textComponent = new Text(message, 0, 0);
+			return {
+				render(width: number) {
+					return textComponent.render(width);
+				},
+				invalidate() {
+					textComponent.invalidate();
+				},
+			};
+		};
+		if (ctx.ui.setWidget.length >= 2) ctx.ui.setWidget(PLANNING_WIDGET_ID, renderer);
+		else ctx.ui.setWidget(renderer);
 	}
 }
 
