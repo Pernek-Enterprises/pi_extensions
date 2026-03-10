@@ -6,7 +6,7 @@ import { BorderedLoader, type ExtensionAPI, type ExtensionContext } from "@mario
 type TestFramework = "vitest" | "jest" | "unknown";
 type LoopMode = "ask-each-round" | "auto-fix";
 type LoopStatus = "idle" | "generating" | "assessing" | "awaiting-user" | "promoting" | "completed" | "cancelled" | "failed";
-type LoopStopReason = "no-findings-remaining" | "user-accepted-current-output" | "safety-cap-reached" | "cancelled" | "generation-failed" | "assessment-failed";
+type LoopStopReason = "no-findings-remaining" | "no-blocking-findings" | "user-accepted-current-output" | "safety-cap-reached" | "cancelled" | "generation-failed" | "assessment-failed";
 type AssessmentIsolationMode = "isolated-single-turn";
 type FindingCategory = "superficial-source-tests" | "missing-major-plan-coverage" | "non-executable-or-unrealistic" | "insufficient-behavioral-assertions" | "ambiguity" | "other";
 type FindingSeverity = "low" | "medium" | "high";
@@ -917,6 +917,10 @@ function normalizeAssessment(result: AssessmentResult | null): AssessmentResult 
 	};
 }
 
+function hasBlockingFindings(assessment: AssessmentResult): boolean {
+	return assessment.findings.some((f) => f.severity === "high");
+}
+
 function detectSuperficialPatterns(testCode: string): AssessorFinding[] {
 	const findings: AssessorFinding[] = [];
 	const normalized = testCode.toLowerCase();
@@ -1756,6 +1760,20 @@ async function runTddPlanLoop(
 			break;
 		}
 
+		if (!hasBlockingFindings(assessment)) {
+			notify(ctx, `TDD loop: no blocking findings remain after round ${iteration}, accepting staged tests.`, "info");
+			accepted = { generated, stagedOutputPath: iterationPaths.stagedOutputPath };
+			state.iterations[state.iterations.length - 1].continueDecision = "accept";
+			state = await applyLoopState({ ...ctx, pi }, {
+				...state,
+				status: "promoting",
+				stopReason: "no-blocking-findings",
+				lastSummary: assessment.summary || "No blocking findings remaining.",
+				updatedAt: new Date().toISOString(),
+			});
+			break;
+		}
+
 		notify(ctx, `TDD loop round ${iteration}: ${assessment.findings.length} finding(s)`, "warning");
 		if (assessment.findings.length > 0) {
 			const topFindings = assessment.findings
@@ -1864,7 +1882,7 @@ async function runTddPlanLoop(
 	await setLoopWidget(ctx, undefined);
 
 	notify(ctx, `Generated TDD tests: ${path.relative(rootDir, finalOutputPath)}`, "info");
-	notify(ctx, `Loop stop reason: ${state.stopReason ?? "completed"}`, state.stopReason === "no-findings-remaining" ? "info" : "warning");
+	notify(ctx, `Loop stop reason: ${state.stopReason ?? "completed"}`, state.stopReason === "no-findings-remaining" || state.stopReason === "no-blocking-findings" ? "info" : "warning");
 	if (state.lastFindings?.length) notify(ctx, `Final round findings preserved: ${state.lastFindings.length}`, "warning");
 }
 
@@ -1875,6 +1893,7 @@ export const __testables = {
 	buildAssessmentFeedbackPrompt,
 	renderAssessmentSummary,
 	normalizeAssessment,
+	hasBlockingFindings,
 	detectFramework,
 	getConfigTestEntries,
 	inferTestDirectoriesFromText,
