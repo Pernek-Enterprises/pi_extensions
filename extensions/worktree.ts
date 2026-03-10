@@ -35,7 +35,7 @@ type PiApi = {
 let runtimePi: PiApi | undefined;
 
 type WorktreeFailure = {
-	command: "worktree-start" | "worktree-pr" | "worktree-cleanup";
+	command: "worktree-start" | "worktree-pr" | "worktree-main" | "worktree-cleanup";
 	phase: string;
 	reason: string;
 	at: string;
@@ -299,6 +299,93 @@ function buildFallbackPiCommand(worktreePath: string): string {
 	return `cd ${JSON.stringify(worktreePath)} && pi`;
 }
 
+function buildCleanupHint(repoRoot: string, slug: string): string {
+	return `cd ${JSON.stringify(repoRoot)} && pi, then run /worktree-cleanup ${slug}`;
+}
+
+function escapeAppleScriptString(value: string): string {
+	return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function runAppleScript(ctx: Ctx, cwd: string, script: string): Promise<ExecResult> {
+	const command = `osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`;
+	return await run(ctx, command, { cwd });
+}
+
+async function launchPiInCmuxTab(ctx: Ctx, worktreePath: string): Promise<WorktreeMetadata["handoff"] | undefined> {
+	if (!trimOutput(process.env.CMUX_WORKSPACE_ID) && !trimOutput(process.env.CMUX_SOCKET_PATH)) return undefined;
+	const shellCommand = buildFallbackPiCommand(worktreePath);
+	const create = await run(ctx, "cmux --json new-surface --type terminal", { cwd: worktreePath });
+	if (create.code !== 0) {
+		const reason = trimOutput(create.stderr) || trimOutput(create.stdout) || `cmux new-surface failed with code ${create.code}`;
+		warn(ctx, `Automatic pi handoff skipped for ${worktreePath} to preserve the current session. Fallback: ${shellCommand}. Reason: ${reason}`);
+		return { attempted: true, ok: false, reason, command: shellCommand };
+	}
+	let surfaceRef = "";
+	try {
+		surfaceRef = String((JSON.parse(create.stdout) as { surface_ref?: string }).surface_ref ?? "");
+	} catch {
+		// handled below with a safe fallback
+	}
+	if (!surfaceRef) {
+		const reason = "cmux did not return a surface_ref for the new tab";
+		warn(ctx, `Automatic pi handoff skipped for ${worktreePath} to preserve the current session. Fallback: ${shellCommand}. Reason: ${reason}`);
+		return { attempted: true, ok: false, reason, command: shellCommand };
+	}
+	const surfaceFlag = ` --surface ${shQuote(surfaceRef)}`;
+	const send = await run(ctx, `cmux send${surfaceFlag} ${shQuote(`${shellCommand}\n`)}`, { cwd: worktreePath });
+	if (send.code !== 0) {
+		const reason = trimOutput(send.stderr) || trimOutput(send.stdout) || `cmux send failed with code ${send.code}`;
+		warn(ctx, `Automatic pi handoff skipped for ${worktreePath} to preserve the current session. Fallback: ${shellCommand}. Reason: ${reason}`);
+		return { attempted: true, ok: false, reason, command: shellCommand };
+	}
+	return { attempted: true, ok: true, command: shellCommand };
+}
+
+async function launchPiInTmuxTab(ctx: Ctx, worktreePath: string): Promise<WorktreeMetadata["handoff"] | undefined> {
+	if (!trimOutput(process.env.TMUX)) return undefined;
+	const shellCommand = buildFallbackPiCommand(worktreePath);
+	const result = await run(ctx, `tmux new-window ${shQuote(shellCommand)}`, { cwd: worktreePath });
+	if (result.code === 0) return { attempted: true, ok: true, command: shellCommand };
+	const reason = trimOutput(result.stderr) || trimOutput(result.stdout) || `tmux new-window failed with code ${result.code}`;
+	warn(ctx, `Automatic pi handoff skipped for ${worktreePath} to preserve the current session. Fallback: ${shellCommand}. Reason: ${reason}`);
+	return { attempted: true, ok: false, reason, command: shellCommand };
+}
+
+async function launchPiInNewTerminalTab(ctx: Ctx, worktreePath: string): Promise<WorktreeMetadata["handoff"] | undefined> {
+	if (process.platform !== "darwin") return undefined;
+	const termProgram = trimOutput(process.env.TERM_PROGRAM);
+	const shellCommand = buildFallbackPiCommand(worktreePath);
+	const escapedShellCommand = escapeAppleScriptString(shellCommand);
+	const terminalScript = `tell application "Terminal"
+activate
+if (count of windows) is 0 then
+	do script "${escapedShellCommand}"
+else
+	do script "${escapedShellCommand}" in front window
+end if
+end tell`;
+	const iTermScript = `tell application "iTerm"
+activate
+if (count of windows) is 0 then
+	create window with default profile command "${escapedShellCommand}"
+else
+	tell current window
+		create tab with default profile command "${escapedShellCommand}"
+	end tell
+end if
+end tell`;
+	const preferredScript = termProgram === "iTerm.app" ? iTermScript : terminalScript;
+	const fallbackScript = preferredScript === iTermScript ? terminalScript : iTermScript;
+	const preferred = await runAppleScript(ctx, worktreePath, preferredScript);
+	if (preferred.code === 0) return { attempted: true, ok: true, command: shellCommand };
+	const fallback = await runAppleScript(ctx, worktreePath, fallbackScript);
+	if (fallback.code === 0) return { attempted: true, ok: true, command: shellCommand };
+	const reason = trimOutput(fallback.stderr) || trimOutput(preferred.stderr) || trimOutput(fallback.stdout) || trimOutput(preferred.stdout) || "Failed to open a new terminal tab";
+	warn(ctx, `Automatic pi handoff skipped for ${worktreePath} to preserve the current session. Fallback: ${shellCommand}. Reason: ${reason}`);
+	return { attempted: true, ok: false, reason, command: shellCommand };
+}
+
 function isExecutableFile(filePath: string): boolean {
 	try {
 		accessSync(filePath, fsConstants.X_OK);
@@ -391,7 +478,17 @@ async function runPiWithTerminalHandoff(
 async function attemptWorktreeHandoff(ctx: Ctx, worktreePath: string): Promise<WorktreeMetadata["handoff"]> {
 	const command = "pi";
 	try {
-		if (ctx.hasUI && ctx.ui?.custom) return await runPiWithTerminalHandoff(ctx, worktreePath);
+		if (ctx.hasUI) {
+			const cmuxHandoff = await launchPiInCmuxTab(ctx, worktreePath);
+			if (cmuxHandoff) return cmuxHandoff;
+			const tmuxHandoff = await launchPiInTmuxTab(ctx, worktreePath);
+			if (tmuxHandoff) return tmuxHandoff;
+			const externalTerminalHandoff = await launchPiInNewTerminalTab(ctx, worktreePath);
+			if (externalTerminalHandoff) return externalTerminalHandoff;
+			const reason = "Non-destructive tab handoff is only supported on CMUX, TMUX, or macOS terminal apps";
+			warn(ctx, `Automatic pi handoff skipped for ${worktreePath} to preserve the current session. Fallback: ${buildFallbackPiCommand(worktreePath)}. Reason: ${reason}`);
+			return { attempted: true, ok: false, reason, command };
+		}
 		const result = await run(ctx, command, { cwd: worktreePath });
 		if (result.code === 0) {
 			return { attempted: true, ok: true, command };
@@ -621,49 +718,88 @@ async function ensureSafeToCleanup(ctx: Ctx, cwd: string): Promise<void> {
 	if (/\[ahead\s+\d+/i.test(sync.stdout)) fail(ctx, "Refusing cleanup of unpushed worktree; branch is ahead of origin.");
 }
 
-async function attemptReturnToMain(ctx: Ctx, repoRoot: string): Promise<void> {
-	try {
-		if (ctx.hasUI && ctx.ui?.custom) {
-			await runPiWithTerminalHandoff(
-				ctx,
-				repoRoot,
-				(reason) => `Cleanup finished. Return to main checkout at ${repoRoot}. Fallback: cd ${JSON.stringify(repoRoot)} && pi. Reason: ${reason}`,
-			);
-			return;
-		}
-		const result = await run(ctx, "pi", { cwd: repoRoot });
-		if (result.code === 0) return;
-		warn(ctx, `Cleanup finished. Return to main checkout at ${repoRoot}. Fallback: cd ${JSON.stringify(repoRoot)} && pi`);
-	} catch {
-		warn(ctx, `Cleanup finished. Return to main checkout at ${repoRoot}. Fallback: cd ${JSON.stringify(repoRoot)} && pi`);
-	}
+async function detectMainCheckout(ctx: Ctx, cwd = ctx.cwd): Promise<{ repoRoot: string; branch: string }> {
+	const repoRoot = await detectRepoRoot(ctx, cwd);
+	const branch = trimOutput((await run(ctx, "git branch --show-current", { cwd: repoRoot })).stdout);
+	if (branch !== "main") fail(ctx, `This command must be run from the main checkout. Current branch: ${branch || "(unknown)"}`);
+	return { repoRoot, branch };
 }
 
-async function handleWorktreeCleanup(ctx: Ctx): Promise<WorktreeMetadata> {
+async function handleWorktreeMain(ctx: Ctx): Promise<WorktreeMetadata> {
 	const cwd = ctx.cwd;
 	let phase = "validate";
 	let metadata: WorktreeMetadata | undefined;
-	let persistenceCwd = cwd;
-	let persistenceSharedRoot: string | undefined;
 
 	try {
 		({ metadata } = await detectManagedWorktreeFromCwd(ctx, cwd));
-		persistenceCwd = metadata.mainCheckoutPath ?? metadata.repoRoot ?? cwd;
-		persistenceSharedRoot = metadata.mainCheckoutPath ?? metadata.repoRoot;
-		await ensureSafeToCleanup(ctx, cwd);
+		const repoRoot = metadata.mainCheckoutPath ?? metadata.repoRoot;
+		if (!repoRoot) fail(ctx, `Managed worktree ${metadata.slug} is missing its main checkout path.`);
+
+		phase = "handoff";
+		info(ctx, `Returning to main checkout at ${repoRoot} for ${metadata.slug}...`);
+		const handoff = await attemptWorktreeHandoff(ctx, repoRoot);
+		const nextMetadata: WorktreeMetadata = {
+			...metadata,
+			returnTarget: repoRoot,
+			handoff,
+		};
+		await persistMetadata(ctx, nextMetadata, repoRoot, repoRoot);
+		await appendHistory(ctx, {
+			type: "worktree-main",
+			slug: metadata.slug,
+			branch: metadata.branch,
+			worktreePath: metadata.worktreePath,
+			returnTarget: repoRoot,
+			updatedAt: new Date().toISOString(),
+		}, repoRoot, repoRoot);
+		info(ctx, `Main checkout ready: ${repoRoot}`);
+		warn(ctx, `To remove this worktree, ${buildCleanupHint(repoRoot, metadata.slug)}.`);
+		return nextMetadata;
+	} catch (error) {
+		const reason = (error as Error).message || "Unknown worktree-main failure";
+		await recordFailure(ctx, { command: "worktree-main", phase, reason }, metadata, { cwd });
+		throw error;
+	}
+}
+
+async function handleWorktreeCleanup(ctx: Ctx, rawSlug?: string): Promise<WorktreeMetadata> {
+	const cwd = ctx.cwd;
+	let phase = "validate";
+	let metadata: WorktreeMetadata | undefined;
+	let repoRoot = cwd;
+
+	try {
+		const currentBranch = trimOutput((await runInCwd(ctx, cwd, "git branch --show-current")).stdout);
+		if (currentBranch.startsWith("worktree/")) {
+			const currentSlug = currentBranch.replace(/^worktree\//, "");
+			fail(ctx, `Run /worktree-main first, then /worktree-cleanup ${currentSlug} from the main checkout.`);
+		}
+		({ repoRoot } = await detectMainCheckout(ctx, cwd));
+
+		const slug = slugify(rawSlug ?? "");
+		if (!rawSlug?.trim()) fail(ctx, "Usage: /worktree-cleanup <slug>");
+		metadata = await readMetadata(ctx, slug, repoRoot);
+		if (!metadata) fail(ctx, `No managed worktree metadata found for worktree/${slug}.`);
+		if (metadata.branch !== getBranchName(slug)) fail(ctx, `Managed worktree metadata mismatch for worktree/${slug}.`);
+		if ((metadata.mainCheckoutPath ?? metadata.repoRoot) && (metadata.mainCheckoutPath ?? metadata.repoRoot) !== repoRoot) {
+			fail(ctx, `Managed worktree ${slug} belongs to a different main checkout: ${(metadata.mainCheckoutPath ?? metadata.repoRoot)}`);
+		}
+
+		phase = "verify";
+		await ensureSafeToCleanup(ctx, metadata.worktreePath);
 
 		phase = "cleanup";
 		info(ctx, `Cleaning up managed worktree ${metadata.slug}...`);
-		await runInCwd(ctx, cwd, `git worktree remove ${shQuote(metadata.worktreePath)}`);
+		await runInCwd(ctx, repoRoot, `git worktree remove ${shQuote(metadata.worktreePath)}`);
 
-		phase = "return";
+		phase = "persist";
 		const nextMetadata: WorktreeMetadata = {
 			...metadata,
 			cleanupResult: "removed",
-			returnTarget: metadata.mainCheckoutPath ?? metadata.repoRoot,
+			returnTarget: repoRoot,
 			cleanupAt: new Date().toISOString(),
 		};
-		await persistMetadata(ctx, nextMetadata, persistenceCwd, persistenceSharedRoot);
+		await persistMetadata(ctx, nextMetadata, repoRoot, repoRoot);
 		await appendHistory(ctx, {
 			type: "worktree-cleanup",
 			slug: metadata.slug,
@@ -671,13 +807,13 @@ async function handleWorktreeCleanup(ctx: Ctx): Promise<WorktreeMetadata> {
 			worktreePath: metadata.worktreePath,
 			cleanupResult: nextMetadata.cleanupResult,
 			cleanupAt: nextMetadata.cleanupAt,
-		}, persistenceCwd, persistenceSharedRoot);
+		}, repoRoot, repoRoot);
 		info(ctx, `Cleanup completed for ${metadata.slug}.`);
-		await attemptReturnToMain(ctx, nextMetadata.returnTarget ?? metadata.repoRoot ?? "/");
+		warn(ctx, `Cleanup finished. Main checkout remains at ${repoRoot}.`);
 		return nextMetadata;
 	} catch (error) {
 		const reason = (error as Error).message || "Unknown worktree-cleanup failure";
-		await recordFailure(ctx, { command: "worktree-cleanup", phase, reason }, metadata, { cwd }, persistenceCwd, persistenceSharedRoot);
+		await recordFailure(ctx, { command: "worktree-cleanup", phase, reason }, metadata, { cwd, slug: rawSlug?.trim() || undefined }, repoRoot, repoRoot);
 		throw error;
 	}
 }
@@ -694,9 +830,14 @@ const commands = [
 		handler: async (ctx: Ctx) => await handleWorktreePr(ctx),
 	},
 	{
+		name: "/worktree-main",
+		registerName: "worktree-main",
+		handler: async (ctx: Ctx) => await handleWorktreeMain(ctx),
+	},
+	{
 		name: "/worktree-cleanup",
 		registerName: "worktree-cleanup",
-		handler: async (ctx: Ctx) => await handleWorktreeCleanup(ctx),
+		handler: async (ctx: Ctx, slug?: string) => await handleWorktreeCleanup(ctx, slug),
 	},
 ] as const;
 
@@ -707,7 +848,7 @@ function worktreeExtension(pi?: PiApi) {
 			description: `Managed git worktree command ${command.name}`,
 			handler: async (args, ctx) => {
 				const trimmedArgs = args?.trim();
-				if (command.registerName === "worktree-start") return await command.handler(ctx, trimmedArgs);
+				if (command.registerName === "worktree-start" || command.registerName === "worktree-cleanup") return await command.handler(ctx, trimmedArgs);
 				return await command.handler(ctx);
 			},
 		});

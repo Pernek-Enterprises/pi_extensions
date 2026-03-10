@@ -143,13 +143,14 @@ function firstWrite(ctx: Ctx, path: string): PersistCall | undefined {
 	return ctx.persistCalls.find((call) => call.path === path && call.mode === "write");
 }
 
-test("Add a new extension with /worktree-start, /worktree-pr, and /worktree-cleanup command registration following local extension conventions", () => {
+test("Add a new extension with /worktree-start, /worktree-pr, /worktree-main, and /worktree-cleanup command registration following local extension conventions", () => {
 	assert.equal(typeof worktreeExtension, "function");
 	const commands = getRegisteredCommands(worktreeExtension);
 	const names = commands.map((command) => command.name);
 
 	assert.ok(names.includes("worktree-start"), "expected worktree-start command registration");
 	assert.ok(names.includes("worktree-pr"), "expected worktree-pr command registration");
+	assert.ok(names.includes("worktree-main"), "expected worktree-main command registration");
 	assert.ok(names.includes("worktree-cleanup"), "expected worktree-cleanup command registration");
 });
 
@@ -277,42 +278,136 @@ test("/worktree-start fails immediately when git worktree add fails and does not
 	assert.ok(historyEntries(ctx).some((entry) => entry.type === "worktree-start-failed" && entry.phase === "create" && /leading directories/i.test(String(entry.reason))));
 });
 
-test("Interactive /worktree-start handoff uses a real terminal launch instead of non-interactive exec", async () => {
+test("Interactive /worktree-start handoff prefers cmux and opens a new cmux tab", async () => {
 	const startWorktree = getCommand(worktreeExtension, "worktree-start");
-	let stopCalled = 0;
-	let startCalled = 0;
-	let renderCalled = 0;
-	const ctx = createCtx({
-		hasUI: true,
-		ui: {
-			custom: async <T>(renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => {
-				let result!: T;
-				renderer(
-					{
-						stop: () => {
-							stopCalled += 1;
-						},
-						start: () => {
-							startCalled += 1;
-						},
-						requestRender: () => {
-							renderCalled += 1;
-						},
-					},
-					null,
-					null,
-					(value: T) => {
-						result = value;
-					},
-				);
-				return result;
-			},
-		},
-		spawnInteractive: (command, args, options) => {
-			ctx.execCalls.push({ command: `${command} ${args.join(" ")}`.trim(), options });
-			return { status: 0, stdout: Buffer.from(""), stderr: Buffer.from(""), signal: null };
-		},
-	});
+	const originalCmuxWorkspace = process.env.CMUX_WORKSPACE_ID;
+	const originalCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
+	process.env.CMUX_WORKSPACE_ID = "workspace-1";
+	process.env.CMUX_SOCKET_PATH = "/tmp/cmux.sock";
+	const ctx = createCtx({ hasUI: true, ui: {} });
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-cmux")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === "cmux --json new-surface --type terminal") return { stdout: '{"surface_ref":"surface:11"}\n', stderr: "", code: 0 };
+		if (command.startsWith("cmux send --surface \"surface:11\" ")) return { stdout: "", stderr: "", code: 0 };
+		if (command.startsWith("osascript") || command.startsWith("tmux ")) throw new Error("cmux handoff should take priority");
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+	try {
+		await startWorktree(ctx, "feature-cmux");
+	} finally {
+		process.env.CMUX_WORKSPACE_ID = originalCmuxWorkspace;
+		process.env.CMUX_SOCKET_PATH = originalCmuxSocketPath;
+	}
+	assert.ok(ctx.execCalls.some((call) => call.command === "cmux --json new-surface --type terminal"));
+	assert.ok(ctx.execCalls.some((call) => call.command.startsWith("cmux send --surface \"surface:11\" ") && call.command.includes("feature-cmux") && call.command.includes("&& pi") && call.command.includes("\\n")));
+});
+
+test("Interactive /worktree-start preserves the current session when cmux does not return a surface_ref", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const originalCmuxWorkspace = process.env.CMUX_WORKSPACE_ID;
+	const originalCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
+	process.env.CMUX_WORKSPACE_ID = "workspace-1";
+	process.env.CMUX_SOCKET_PATH = "/tmp/cmux.sock";
+	const ctx = createCtx({ hasUI: true, ui: {} });
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-cmux-no-surface")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === "cmux --json new-surface --type terminal") return { stdout: '{}\n', stderr: "", code: 0 };
+		if (command.startsWith("cmux send ")) throw new Error("should not send to cmux without a surface_ref");
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+	try {
+		await startWorktree(ctx, "feature-cmux-no-surface");
+	} finally {
+		process.env.CMUX_WORKSPACE_ID = originalCmuxWorkspace;
+		process.env.CMUX_SOCKET_PATH = originalCmuxSocketPath;
+	}
+	assert.match(messagesAtLevel(ctx, "warn").join("\n"), /surface_ref|Fallback: cd .*feature-cmux-no-surface.*&& pi/i);
+	const metadata = parseJson<Record<string, unknown>>(ctx.artifacts.get(".pi/worktrees/feature-cmux-no-surface.json")!);
+	assert.equal((metadata.handoff as Record<string, unknown>)?.ok, false);
+});
+
+test("Interactive /worktree-start preserves the current session when cmux send fails", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const originalCmuxWorkspace = process.env.CMUX_WORKSPACE_ID;
+	const originalCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
+	process.env.CMUX_WORKSPACE_ID = "workspace-1";
+	process.env.CMUX_SOCKET_PATH = "/tmp/cmux.sock";
+	const ctx = createCtx({ hasUI: true, ui: {} });
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-cmux-send-fail")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command === "cmux --json new-surface --type terminal") return { stdout: '{"surface_ref":"surface:11"}\n', stderr: "", code: 0 };
+		if (command.startsWith("cmux send --surface \"surface:11\" ")) return { stdout: "", stderr: "cmux send failed", code: 1 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+	try {
+		await startWorktree(ctx, "feature-cmux-send-fail");
+	} finally {
+		process.env.CMUX_WORKSPACE_ID = originalCmuxWorkspace;
+		process.env.CMUX_SOCKET_PATH = originalCmuxSocketPath;
+	}
+	assert.match(messagesAtLevel(ctx, "warn").join("\n"), /cmux send failed|Fallback: cd .*feature-cmux-send-fail.*&& pi/i);
+});
+
+test("Interactive /worktree-start handoff falls back to tmux when cmux is unavailable", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const originalTmux = process.env.TMUX;
+	const originalCmuxWorkspace = process.env.CMUX_WORKSPACE_ID;
+	const originalCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
+	delete process.env.CMUX_WORKSPACE_ID;
+	delete process.env.CMUX_SOCKET_PATH;
+	process.env.TMUX = "tmux-session";
+	const ctx = createCtx({ hasUI: true, ui: {} });
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-tmux")) return { stdout: "", stderr: "", code: 1 };
+		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
+		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command.startsWith("tmux new-window ")) return { stdout: "", stderr: "", code: 0 };
+		if (command.startsWith("osascript") || command.startsWith("cmux ")) throw new Error("tmux handoff should take priority after cmux");
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+	try {
+		await startWorktree(ctx, "feature-tmux");
+	} finally {
+		process.env.TMUX = originalTmux;
+		process.env.CMUX_WORKSPACE_ID = originalCmuxWorkspace;
+		process.env.CMUX_SOCKET_PATH = originalCmuxSocketPath;
+	}
+	assert.ok(ctx.execCalls.some((call) => call.command.startsWith("tmux new-window ") && call.command.includes("feature-tmux") && call.command.includes("&& pi")));
+});
+
+test("Interactive /worktree-start handoff opens pi in a new terminal tab with cd && pi when no mux is active", async () => {
+	const startWorktree = getCommand(worktreeExtension, "worktree-start");
+	const originalTermProgram = process.env.TERM_PROGRAM;
+	const originalTmux = process.env.TMUX;
+	const originalCmuxWorkspace = process.env.CMUX_WORKSPACE_ID;
+	const originalCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
+	delete process.env.TMUX;
+	delete process.env.CMUX_WORKSPACE_ID;
+	delete process.env.CMUX_SOCKET_PATH;
+	process.env.TERM_PROGRAM = "Apple_Terminal";
+	const ctx = createCtx({ hasUI: true, ui: {} });
 
 	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
 		ctx.execCalls.push({ command, options });
@@ -322,61 +417,110 @@ test("Interactive /worktree-start handoff uses a real terminal launch instead of
 		if (command.includes("show-ref") && command.includes("worktree/feature-ui")) return { stdout: "", stderr: "", code: 1 };
 		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
 		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
-		if (command === "pi") throw new Error("interactive handoff should not use ctx.exec");
+		if (command.startsWith("osascript <<'APPLESCRIPT'")) return { stdout: "", stderr: "", code: 0 };
+		if (command === "pi") throw new Error("interactive handoff should use a new terminal tab");
 		throw new Error(`Unexpected exec: ${command}`);
 	};
 
-	await startWorktree(ctx, "feature-ui");
+	try {
+		await startWorktree(ctx, "feature-ui");
+	} finally {
+		process.env.TERM_PROGRAM = originalTermProgram;
+		process.env.TMUX = originalTmux;
+		process.env.CMUX_WORKSPACE_ID = originalCmuxWorkspace;
+		process.env.CMUX_SOCKET_PATH = originalCmuxSocketPath;
+	}
 
-	assert.equal(stopCalled, 1);
-	assert.equal(startCalled, 1);
-	assert.equal(renderCalled, 1);
-	const handoffCall = ctx.execCalls.find((call) => call.command === "pi" || String(call.command).endsWith("/pi") || String(call.command).endsWith("/node"));
-	assert.ok(handoffCall, "expected interactive handoff to launch pi");
-	assert.equal(handoffCall?.options?.cwd, worktreePath("feature-ui"));
+	const handoffCall = ctx.execCalls.find((call) => call.command.startsWith("osascript <<'APPLESCRIPT'"));
+	assert.ok(handoffCall, "expected interactive handoff to launch a new terminal tab");
+	assert.match(handoffCall?.command ?? "", /Terminal/);
+	assert.match(handoffCall?.command ?? "", /do script/);
+	assert.match(handoffCall?.command ?? "", /cd .*feature-ui.*&& pi/);
+	assert.ok(!ctx.execCalls.some((call) => call.command === "pi"));
 });
 
-test("Interactive /worktree-start handoff falls back to the installed CLI script when pi is not on PATH", async () => {
+test("/worktree-main prefers cmux handoff when returning from a managed worktree", async () => {
+	const worktreeMain = getCommand(worktreeExtension, "worktree-main");
+	const originalCmuxWorkspace = process.env.CMUX_WORKSPACE_ID;
+	const originalCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
+	process.env.CMUX_WORKSPACE_ID = "workspace-1";
+	process.env.CMUX_SOCKET_PATH = "/tmp/cmux.sock";
+	const ctx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-main-cmux", hasUI: true, ui: {} });
+	seedArtifact(ctx, ".pi/worktrees/feature-main-cmux.json", {
+		slug: "feature-main-cmux",
+		branch: "worktree/feature-main-cmux",
+		repoRoot: "/repo",
+		mainCheckoutPath: "/repo",
+		worktreePath: "/parallel/.worktrees/repo/feature-main-cmux",
+		createdAt: "2025-01-01T00:00:00.000Z",
+	});
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (options?.cwd === "/parallel/.worktrees/repo/feature-main-cmux") {
+			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+			if (command === "git branch --show-current") return { stdout: "worktree/feature-main-cmux\n", stderr: "", code: 0 };
+		}
+		if (command === "cmux --json new-surface --type terminal") return { stdout: '{"surface_ref":"surface:19"}\n', stderr: "", code: 0 };
+		if (command.startsWith("cmux send --surface \"surface:19\" ")) return { stdout: "", stderr: "", code: 0 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+	try {
+		await worktreeMain(ctx);
+	} finally {
+		process.env.CMUX_WORKSPACE_ID = originalCmuxWorkspace;
+		process.env.CMUX_SOCKET_PATH = originalCmuxSocketPath;
+	}
+	assert.ok(ctx.execCalls.some((call) => call.command.startsWith("cmux send --surface \"surface:19\" ") && call.command.includes("/repo") && call.command.includes("&& pi") && call.command.includes("\\n")));
+	assert.ok(historyEntries(ctx).some((entry) => entry.type === "worktree-main" && entry.returnTarget === "/repo"));
+});
+
+test("Interactive /worktree-start preserves the current session when all tab-launch attempts fail", async () => {
 	const startWorktree = getCommand(worktreeExtension, "worktree-start");
-	const originalPath = process.env.PATH;
-	process.env.PATH = "";
+	const originalTmux = process.env.TMUX;
+	const originalCmuxWorkspace = process.env.CMUX_WORKSPACE_ID;
+	const originalCmuxSocketPath = process.env.CMUX_SOCKET_PATH;
+	delete process.env.TMUX;
+	delete process.env.CMUX_WORKSPACE_ID;
+	delete process.env.CMUX_SOCKET_PATH;
+	let customCalled = 0;
+	let spawnCalled = 0;
 	const ctx = createCtx({
 		hasUI: true,
 		ui: {
-			custom: async <T>(renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => {
-				let result!: T;
-				renderer({}, null, null, (value: T) => {
-					result = value;
-				});
-				return result;
+			custom: async <T>(_renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => {
+				customCalled += 1;
+				throw new Error("non-destructive fallback should not replace the current terminal session");
 			},
 		},
-		spawnInteractive: (command, args, options) => {
-			ctx.execCalls.push({ command: `${command} ${args.join(" ")}`.trim(), options });
-			return { status: 0, stdout: Buffer.from(""), stderr: Buffer.from(""), signal: null };
+		spawnInteractive: () => {
+			spawnCalled += 1;
+			throw new Error("non-destructive fallback should not spawn an in-terminal handoff");
 		},
 	});
-
 	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
 		ctx.execCalls.push({ command, options });
 		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
 		if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
 		if (command === "git remote get-url origin") return { stdout: "git@github.com:org/repo.git\n", stderr: "", code: 0 };
-		if (command.includes("show-ref") && command.includes("worktree/feature-ui-pathless")) return { stdout: "", stderr: "", code: 1 };
+		if (command.includes("show-ref") && command.includes("worktree/feature-ui-fallback")) return { stdout: "", stderr: "", code: 1 };
 		if (command === "git worktree list --porcelain") return { stdout: "worktree /repo\nbranch refs/heads/main\n", stderr: "", code: 0 };
 		if (command.startsWith("git worktree add ")) return { stdout: "", stderr: "", code: 0 };
+		if (command.startsWith("osascript <<'APPLESCRIPT'")) return { stdout: "", stderr: "launch failed", code: 1 };
+		if (command === "pi") throw new Error("non-destructive fallback should not exec pi in the current session");
 		throw new Error(`Unexpected exec: ${command}`);
 	};
-
 	try {
-		await startWorktree(ctx, "feature-ui-pathless");
+		await startWorktree(ctx, "feature-ui-fallback");
 	} finally {
-		process.env.PATH = originalPath;
+		process.env.TMUX = originalTmux;
+		process.env.CMUX_WORKSPACE_ID = originalCmuxWorkspace;
+		process.env.CMUX_SOCKET_PATH = originalCmuxSocketPath;
 	}
-
-	const handoffCall = ctx.execCalls.find((call) => String(call.command).includes("dist/cli.js"));
-	assert.ok(handoffCall, "expected interactive handoff to fall back to the resolved pi CLI script");
-	assert.equal(handoffCall?.options?.cwd, worktreePath("feature-ui-pathless"));
+	assert.equal(customCalled, 0);
+	assert.equal(spawnCalled, 0);
+	assert.ok(!ctx.execCalls.some((call) => call.command === "pi" || String(call.command).endsWith("/pi") || String(call.command).endsWith("/node")));
+	assert.equal(ctx.execCalls.filter((call) => call.command.startsWith("osascript <<'APPLESCRIPT'")) .length, 2);
+	assert.match(messagesAtLevel(ctx, "warn").join("\n"), /preserve the current session|Fallback: cd .*feature-ui-fallback.*&& pi/i);
 });
 
 test("Representative /worktree-start validation failures reject before creation and append auditable failure reasons to history", async () => {
@@ -629,9 +773,39 @@ test("Existing PR already open for branch causes /worktree-pr to surface the exi
 	assert.match(String(metadata.prStatus ?? ""), /existing/i);
 });
 
-test("/worktree-cleanup reads shared metadata from the main checkout when the worktree has no local .pi metadata copy", async () => {
+test("/worktree-main launches pi in the main checkout for a managed worktree and persists history", async () => {
+	const worktreeMain = getCommand(worktreeExtension, "worktree-main");
+	const ctx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-main-hop" });
+	seedArtifact(ctx, ".pi/worktrees/feature-main-hop.json", {
+		slug: "feature-main-hop",
+		branch: "worktree/feature-main-hop",
+		repoRoot: "/repo",
+		mainCheckoutPath: "/repo",
+		worktreePath: "/parallel/.worktrees/repo/feature-main-hop",
+		createdAt: "2025-01-01T00:00:00.000Z",
+	});
+	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
+		ctx.execCalls.push({ command, options });
+		if (options?.cwd === "/parallel/.worktrees/repo/feature-main-hop") {
+			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+			if (command === "git branch --show-current") return { stdout: "worktree/feature-main-hop\n", stderr: "", code: 0 };
+		}
+		if (command === "pi" && options?.cwd === "/repo") return { stdout: "", stderr: "", code: 0 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+
+	await worktreeMain(ctx);
+
+	const metadata = parseJson<Record<string, unknown>>(ctx.artifacts.get(".pi/worktrees/feature-main-hop.json")!);
+	assert.equal(metadata.returnTarget, "/repo");
+	assert.equal((metadata.handoff as Record<string, unknown>)?.ok, true);
+	assert.ok(historyEntries(ctx).some((entry) => entry.type === "worktree-main" && entry.slug === "feature-main-hop"));
+	assert.match(ctx.notices.map((notice) => notice.message).join("\n"), /worktree-cleanup feature-main-hop/i);
+});
+
+test("/worktree-cleanup reads shared metadata from the main checkout and removes the target worktree by slug", async () => {
 	const cleanupWorktree = getCommand(worktreeExtension, "worktree-cleanup");
-	const ctx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-clean-shared" });
+	const ctx = createCtx({ cwd: "/repo" });
 	seedArtifact(ctx, "/repo/.pi/worktrees/feature-clean-shared.json", {
 		slug: "feature-clean-shared",
 		branch: "worktree/feature-clean-shared",
@@ -640,63 +814,84 @@ test("/worktree-cleanup reads shared metadata from the main checkout when the wo
 		worktreePath: "/parallel/.worktrees/repo/feature-clean-shared",
 		createdAt: "2025-01-01T00:00:00.000Z",
 	});
-	let removed = false;
 	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
 		ctx.execCalls.push({ command, options });
+		if (options?.cwd === "/repo") {
+			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+			if (command.startsWith("git worktree remove ")) return { stdout: "", stderr: "", code: 0 };
+		}
 		if (options?.cwd === "/parallel/.worktrees/repo/feature-clean-shared") {
-			if (removed) throw new Error(`cwd missing after removal: ${command}`);
-			if (command === "git rev-parse --show-toplevel") return { stdout: "/parallel/.worktrees/repo/feature-clean-shared\n", stderr: "", code: 0 };
-			if (command === "git branch --show-current") return { stdout: "worktree/feature-clean-shared\n", stderr: "", code: 0 };
-			if (command === "git rev-parse --git-common-dir") return { stdout: "/repo/.git\n", stderr: "", code: 0 };
 			if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
 			if (command === "git status -sb") return { stdout: "## worktree/feature-clean-shared...origin/worktree/feature-clean-shared\n", stderr: "", code: 0 };
-			if (command.startsWith("git worktree remove ")) {
-				removed = true;
-				return { stdout: "", stderr: "", code: 0 };
-			}
 		}
-		if (command === "pi" && options?.cwd === "/repo") return { stdout: "", stderr: "return handoff unavailable", code: 1 };
+		if (command === "git rev-parse --git-common-dir") return { stdout: "/repo/.git\n", stderr: "", code: 0 };
 		throw new Error(`Unexpected exec: ${command}`);
 	};
 
-	await cleanupWorktree(ctx);
+	await cleanupWorktree(ctx, "feature-clean-shared");
 
 	const sharedMetadata = parseJson<Record<string, unknown>>(ctx.artifacts.get("/repo/.pi/worktrees/feature-clean-shared.json")!);
 	assert.match(String(sharedMetadata.cleanupResult ?? ""), /removed/i);
 	assert.ok((ctx.artifacts.get("/repo/.pi/worktrees/history.jsonl") ?? "").includes("worktree-cleanup"));
+	assert.ok(ctx.execCalls.some((call) => call.command.includes("feature-clean-shared")));
 });
 
-test("/worktree-cleanup rejects dirty/unpushed or unmanaged checkouts and records auditable failure reasons", async () => {
+test("/worktree-cleanup rejects running inside a worktree, dirty targets, and missing slug usage while recording failures", async () => {
 	const cleanupWorktree = getCommand(worktreeExtension, "worktree-cleanup");
 
-	const dirtyCtx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-m" });
-	seedArtifact(dirtyCtx, ".pi/worktrees/feature-m.json", { slug: "feature-m", branch: "worktree/feature-m", repoRoot: "/repo", mainCheckoutPath: "/repo", worktreePath: "/parallel/.worktrees/repo/feature-m" });
+	const inWorktreeCtx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-m" });
+	inWorktreeCtx.exec = async (command: string, options?: Record<string, unknown>) => {
+		inWorktreeCtx.execCalls.push({ command, options });
+		if (options?.cwd === "/parallel/.worktrees/repo/feature-m" && command === "git branch --show-current") return { stdout: "worktree/feature-m\n", stderr: "", code: 0 };
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+	await assert.rejects(() => Promise.resolve(cleanupWorktree(inWorktreeCtx, "feature-m")), /worktree-main|main checkout/i);
+	assert.ok(historyEntries(inWorktreeCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /worktree-main|main checkout/i.test(String(entry.reason))));
+
+	const missingSlugCtx = createCtx({ cwd: "/repo" });
+	missingSlugCtx.exec = async (command: string, options?: Record<string, unknown>) => {
+		missingSlugCtx.execCalls.push({ command, options });
+		if (options?.cwd === "/repo") {
+			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		}
+		throw new Error(`Unexpected exec: ${command}`);
+	};
+	await assert.rejects(() => Promise.resolve(cleanupWorktree(missingSlugCtx)), /Usage: \/worktree-cleanup <slug>/i);
+	assert.ok(historyEntries(missingSlugCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /Usage: \/worktree-cleanup <slug>/i.test(String(entry.reason))));
+
+	const dirtyCtx = createCtx({ cwd: "/repo" });
+	seedArtifact(dirtyCtx, ".pi/worktrees/feature-dirty.json", { slug: "feature-dirty", branch: "worktree/feature-dirty", repoRoot: "/repo", mainCheckoutPath: "/repo", worktreePath: "/parallel/.worktrees/repo/feature-dirty" });
 	dirtyCtx.exec = async (command: string, options?: Record<string, unknown>) => {
 		dirtyCtx.execCalls.push({ command, options });
-		assert.equal(options?.cwd, "/parallel/.worktrees/repo/feature-m");
-		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
-		if (command === "git branch --show-current") return { stdout: "worktree/feature-m\n", stderr: "", code: 0 };
-		if (command === "git status --short") return { stdout: " M src/file.ts\n", stderr: "", code: 0 };
+		if (options?.cwd === "/repo") {
+			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
+			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
+		}
+		if (options?.cwd === "/parallel/.worktrees/repo/feature-dirty" && command === "git status --short") return { stdout: " M src/file.ts\n", stderr: "", code: 0 };
 		throw new Error(`Unexpected exec: ${command}`);
 	};
-	await assert.rejects(() => Promise.resolve(cleanupWorktree(dirtyCtx)), /dirty|uncommitted/i);
+	await assert.rejects(() => Promise.resolve(cleanupWorktree(dirtyCtx, "feature-dirty")), /dirty|uncommitted/i);
 	assert.ok(historyEntries(dirtyCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /dirty|uncommitted/i.test(String(entry.reason))));
-
-	const mismatchCtx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-n" });
-	seedArtifact(mismatchCtx, ".pi/worktrees/feature-n.json", { slug: "feature-n", branch: "worktree/feature-n", worktreePath: "/parallel/.worktrees/repo/other" });
-	mismatchCtx.exec = async (command: string, options?: Record<string, unknown>) => {
-		mismatchCtx.execCalls.push({ command, options });
-		if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
-		if (command === "git branch --show-current") return { stdout: "worktree/feature-n\n", stderr: "", code: 0 };
-		throw new Error(`Unexpected exec: ${command}`);
-	};
-	await assert.rejects(() => Promise.resolve(cleanupWorktree(mismatchCtx)), /mismatch|unmanaged/i);
-	assert.ok(historyEntries(mismatchCtx).some((entry) => entry.type === "worktree-cleanup-failed" && /mismatch|unmanaged/i.test(String(entry.reason))));
 });
 
-test("/worktree-cleanup removes only safe managed worktrees, persists cleanup metadata/history, and provides fallback return instructions when automatic return fails", async () => {
+test("/worktree-cleanup removes only safe managed worktrees from main, persists cleanup metadata/history, and never launches nested pi", async () => {
 	const cleanupWorktree = getCommand(worktreeExtension, "worktree-cleanup");
-	const ctx = createCtx({ cwd: "/parallel/.worktrees/repo/feature-o" });
+	let customCalled = 0;
+	const ctx = createCtx({
+		cwd: "/repo",
+		hasUI: true,
+		ui: {
+			custom: async <T>(_renderer: (tui: { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void }, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown) => {
+				customCalled += 1;
+				throw new Error("cleanup should not open a nested interactive handoff");
+			},
+		},
+		spawnInteractive: () => {
+			throw new Error("cleanup should not spawnInteractive after removal");
+		},
+	});
 	seedArtifact(ctx, ".pi/worktrees/feature-o.json", {
 		slug: "feature-o",
 		branch: "worktree/feature-o",
@@ -707,22 +902,27 @@ test("/worktree-cleanup removes only safe managed worktrees, persists cleanup me
 	});
 	ctx.exec = async (command: string, options?: Record<string, unknown>) => {
 		ctx.execCalls.push({ command, options });
-		if (options?.cwd === "/parallel/.worktrees/repo/feature-o") {
+		if (options?.cwd === "/repo") {
+			if (command === "git branch --show-current") return { stdout: "main\n", stderr: "", code: 0 };
 			if (command === "git rev-parse --show-toplevel") return { stdout: "/repo\n", stderr: "", code: 0 };
-			if (command === "git branch --show-current") return { stdout: "worktree/feature-o\n", stderr: "", code: 0 };
-			if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
-			if (command === "git status -sb") return { stdout: "## worktree/feature-o...origin/worktree/feature-o\n", stderr: "", code: 0 };
 			if (command.startsWith("git worktree remove ")) return { stdout: "", stderr: "", code: 0 };
 		}
-		if (command === "pi" && options?.cwd === "/repo") return { stdout: "", stderr: "return handoff unavailable", code: 1 };
+		if (options?.cwd === "/parallel/.worktrees/repo/feature-o") {
+			if (command === "git status --short") return { stdout: "", stderr: "", code: 0 };
+			if (command === "git status -sb") return { stdout: "## worktree/feature-o...origin/worktree/feature-o\n", stderr: "", code: 0 };
+		}
+		if (command === "pi") throw new Error("cleanup should not exec pi after removal");
 		throw new Error(`Unexpected exec: ${command}`);
 	};
 
-	await cleanupWorktree(ctx);
+	await cleanupWorktree(ctx, "feature-o");
 
 	const metadata = parseJson<Record<string, unknown>>(ctx.artifacts.get(".pi/worktrees/feature-o.json")!);
 	assert.equal(metadata.cleanupResult, "removed");
 	assert.equal(metadata.returnTarget, "/repo");
+	assert.equal(customCalled, 0);
 	assert.ok(historyEntries(ctx).some((entry) => entry.type === "worktree-cleanup" && entry.cleanupResult === "removed"));
-	assert.match(ctx.notices.map((notice) => notice.message).join("\n"), /cd "\/repo" && pi|main checkout/i);
+	assert.ok(ctx.execCalls.some((call) => call.command.startsWith("git worktree remove ")));
+	assert.ok(!ctx.execCalls.some((call) => call.command === "pi"));
+	assert.match(ctx.notices.map((notice) => notice.message).join("\n"), /Main checkout remains at \/repo/i);
 });
