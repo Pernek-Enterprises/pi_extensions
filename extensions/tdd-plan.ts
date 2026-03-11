@@ -1,8 +1,9 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
-import { BorderedLoader, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { complete, type Api, type Model, type UserMessage } from "./lib/pi-ai-compat.ts";
+import { BorderedLoader } from "./lib/pi-coding-agent-compat.ts";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Text } from "./lib/pi-tui-compat.ts";
 
 type TestFramework = "vitest" | "jest" | "unknown";
 type LoopMode = "ask-each-round" | "auto-fix";

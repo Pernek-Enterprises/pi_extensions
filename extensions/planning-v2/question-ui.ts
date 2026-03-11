@@ -8,7 +8,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "../lib/pi-tui-compat.ts";
 import type { PlanningV2Question } from "./question-loop.ts";
 
 export class PlanningV2QnAComponent implements Component {

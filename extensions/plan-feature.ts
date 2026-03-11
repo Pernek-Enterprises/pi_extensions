@@ -12,7 +12,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 	type Component,
-} from "@mariozechner/pi-tui";
+} from "./lib/pi-tui-compat.ts";
 
 type PlanningStatus = "collecting-context" | "clarifying" | "drafting" | "finalized";
 

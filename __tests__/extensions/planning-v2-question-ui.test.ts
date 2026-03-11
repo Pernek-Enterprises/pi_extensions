@@ -11,7 +11,7 @@ test("PlanningV2QnAComponent renders the current question and answer prompt", ()
 		requestRender() {},
 	} as any, () => {});
 
-	const output = component.render(80);
+	const output = component.render(80).join("\n");
 	assert.match(output, /Answer planning questions 1\/2/);
 	assert.match(output, /Is the bug still reproducible\?/);
 	assert.match(output, /Answer:/);

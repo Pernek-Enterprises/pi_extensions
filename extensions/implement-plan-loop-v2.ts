@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
+import { complete, type Api, type Model, type UserMessage } from "./lib/pi-ai-compat.ts";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ExecutionContract } from "./planning-v2/contract-schema.ts";
 import { loadReadyImplementationContract } from "./implement-v2/contract-input.ts";

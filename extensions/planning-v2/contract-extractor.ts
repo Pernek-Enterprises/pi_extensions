@@ -1,4 +1,4 @@
-import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
+import { complete, type Api, type Model, type UserMessage } from "../lib/pi-ai-compat.ts";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ExecutionContract } from "./contract-schema.ts";
 import { validateExecutionContract } from "./contract-validator.ts";
