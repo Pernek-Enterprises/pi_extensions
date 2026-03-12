@@ -1,0 +1,117 @@
+diff --git a/extensions/worktree.ts b/extensions/worktree.ts
+index a3ef872..b60bb05 100644
+--- a/extensions/worktree.ts
++++ b/extensions/worktree.ts
+@@ -69,2 +69,56 @@ type WorktreeMetadata = {
+ 
++type MinimalTui = { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void };
++
++const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
++const SPINNER_INTERVAL_MS = 80;
++
++class ProgressLoader {
++	private tui: MinimalTui;
++	private message: string;
++	private frameIndex = 0;
++	private intervalId: ReturnType<typeof setInterval> | null = null;
++	private abortController = new AbortController();
++	onAbort?: () => void;
++
++	constructor(tui: MinimalTui, message: string) {
++		this.tui = tui;
++		this.message = message;
++		this.intervalId = setInterval(() => {
++			this.frameIndex = (this.frameIndex + 1) % SPINNER_FRAMES.length;
++			this.tui.requestRender?.();
++		}, SPINNER_INTERVAL_MS);
++	}
++
++	get signal(): AbortSignal {
++		return this.abortController.signal;
++	}
++
++	setMessage(message: string): void {
++		this.message = message;
++		this.tui.requestRender?.();
++	}
++
++	stop(): void {
++		if (this.intervalId) {
++			clearInterval(this.intervalId);
++			this.intervalId = null;
++		}
++	}
++
++	render(_width: number): string[] {
++		const frame = SPINNER_FRAMES[this.frameIndex];
++		return ["", `  ${frame} ${this.message}`];
++	}
++
++	handleInput(data: string): void {
++		if (data === "\u001b" || data === "\x03") {
++			this.abortController.abort();
++			this.stop();
++			this.onAbort?.();
++		}
++	}
++
++	invalidate(): void {}
++}
++
+ function info(ctx: Ctx, message: string) {
+@@ -794,3 +848,3 @@ async function getGeneratedTexts(ctx: Ctx, metadata: WorktreeMetadata, branch: s
+ 
+-async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
++async function runPrWorkflow(ctx: Ctx, progress?: ProgressLoader): Promise<WorktreeMetadata> {
+ 	const cwd = ctx.cwd;
+@@ -801,2 +855,3 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+ 	try {
++		progress?.setMessage("Validating worktree…");
+ 		({ metadata, branch } = await detectManagedWorktreeFromCwd(ctx, cwd));
+@@ -805,2 +860,3 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+ 		// Get full diff against main for comprehensive PR description
++		progress?.setMessage("Analyzing changes…");
+ 		const fullDiffResult = await runInCwd(ctx, cwd, "git diff main");
+@@ -812,2 +868,3 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+ 		phase = "commit";
++		progress?.setMessage("Generating commit…");
+ 		const generatedTexts = await getGeneratedTexts(ctx, metadata, branch, fullDiff);
+@@ -823,2 +880,3 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+ 		phase = "push";
++		progress?.setMessage(`Pushing ${branch}…`);
+ 		info(ctx, `Pushing ${branch}...`);
+@@ -828,2 +886,3 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+ 		phase = "pr";
++		progress?.setMessage("Creating pull request…");
+ 		info(ctx, `Preparing PR for ${branch}...`);
+@@ -867,2 +926,30 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+ 
++async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
++	if (ctx.hasUI && ctx.ui?.custom) {
++		return await ctx.ui.custom<WorktreeMetadata>((tui, _theme, _kb, done) => {
++			const progress = new ProgressLoader(tui, "Validating worktree…");
++
++			progress.onAbort = () => {
++				done(new Error("Cancelled") as unknown as WorktreeMetadata);
++			};
++
++			runPrWorkflow(ctx, progress)
++				.then((result) => {
++					progress.stop();
++					done(result);
++				})
++				.catch((err) => {
++					progress.stop();
++					done(err as unknown as WorktreeMetadata);
++				});
++
++			return progress;
++		}).then((result) => {
++			if (result instanceof Error) throw result;
++			return result;
++		});
++	}
++	return await runPrWorkflow(ctx);
++}
++
+ async function ensureSafeToCleanup(ctx: Ctx, cwd: string): Promise<void> {
