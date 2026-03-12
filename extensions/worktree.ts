@@ -693,7 +693,7 @@ async function ensureGhAuthenticated(ctx: Ctx, cwd: string): Promise<void> {
 }
 
 function shQuote(value: string): string {
-	return JSON.stringify(value);
+	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 async function lookupExistingPr(ctx: Ctx, cwd: string, branch: string): Promise<string | undefined> {

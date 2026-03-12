@@ -37,22 +37,41 @@ type Ctx = {
 
 /**
  * Helper to extract the --body content from a `gh pr create` command string.
- * Handles both quoted (single/double) and unquoted body values.
+ * Handles POSIX single-quoted strings where embedded single quotes appear as '\''
  */
 function extractPrBody(command: string): string {
-	// Try --body '...' or --body "..."
-	const singleQuoteMatch = command.match(/--body\s+'([^']*(?:''[^']*)*)'/s);
-	if (singleQuoteMatch) return singleQuoteMatch[1];
+	const bodyIdx = command.indexOf("--body ");
+	if (bodyIdx === -1) return "";
 
-	const doubleQuoteMatch = command.match(/--body\s+"([^"]*(?:""[^']*)*)"/s);
-	if (doubleQuoteMatch) return doubleQuoteMatch[1];
+	const afterBody = command.substring(bodyIdx + 7).trimStart();
+	if (afterBody[0] === "'") {
+		// Parse POSIX single-quoted string with '\'' escaping
+		let result = "";
+		let i = 1; // skip opening quote
+		while (i < afterBody.length) {
+			const closeIdx = afterBody.indexOf("'", i);
+			if (closeIdx === -1) {
+				result += afterBody.substring(i);
+				break;
+			}
+			result += afterBody.substring(i, closeIdx);
+			if (afterBody.substring(closeIdx, closeIdx + 4) === "'\\''" ) {
+				result += "'";
+				i = closeIdx + 4;
+			} else {
+				break;
+			}
+		}
+		return result;
+	}
 
-	// Try --body $'...' (bash ANSI-C quoting)
-	const dollarQuoteMatch = command.match(/--body\s+\$'([^']*)'/s);
-	if (dollarQuoteMatch) return dollarQuoteMatch[1];
+	if (afterBody[0] === '"') {
+		const doubleQuoteMatch = afterBody.match(/^"((?:[^"\\]|\\.)*)"/s);
+		if (doubleQuoteMatch) return doubleQuoteMatch[1];
+	}
 
 	// Fallback: unquoted value until next flag or end
-	const unquotedMatch = command.match(/--body\s+(\S+)/s);
+	const unquotedMatch = afterBody.match(/^(\S+)/s);
 	if (unquotedMatch) return unquotedMatch[1];
 
 	return "";

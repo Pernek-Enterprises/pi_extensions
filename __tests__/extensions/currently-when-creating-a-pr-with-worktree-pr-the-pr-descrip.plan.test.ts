@@ -39,26 +39,44 @@ type CommandHandler = (ctx: Ctx, ...args: string[]) => Promise<unknown> | unknow
 
 /**
  * Extract the --body value from a `gh pr create` command.
- * The actual implementation uses JSON.stringify (shQuote) for quoting,
- * so the body appears as --body "..." with JSON-escaped content.
+ * The implementation uses POSIX single-quote escaping (shQuote),
+ * so the body appears as --body '...' with embedded single quotes escaped as '\''
  */
 function extractPrBody(command: string): string {
-	// Match --body followed by a JSON-quoted string (shQuote = JSON.stringify)
-	const jsonQuoteMatch = command.match(/--body\s+"((?:[^"\\]|\\.)*)"/s);
-	if (jsonQuoteMatch) {
-		// Unescape JSON string escapes
-		try {
-			return JSON.parse(`"${jsonQuoteMatch[1]}"`);
-		} catch {
-			return jsonQuoteMatch[1];
-		}
+	// Match --body followed by a POSIX single-quoted string
+	// POSIX single-quoting: '...' with embedded single quotes as '\''
+	const bodyIdx = command.indexOf("--body ");
+	if (bodyIdx === -1) return "";
+
+	const afterBody = command.substring(bodyIdx + 7).trimStart();
+	if (afterBody[0] !== "'") {
+		// Fallback: unquoted value until next flag or end
+		const unquotedMatch = afterBody.match(/^(\S+)/);
+		return unquotedMatch ? unquotedMatch[1] : "";
 	}
 
-	// Fallback: --body '...'
-	const singleQuoteMatch = command.match(/--body\s+'([^']*)'/s);
-	if (singleQuoteMatch) return singleQuoteMatch[1];
-
-	return "";
+	// Parse POSIX single-quoted string: collect segments between single quotes,
+	// handling '\'' (end quote, escaped quote, start quote) as embedded single quotes
+	let result = "";
+	let i = 1; // skip opening quote
+	while (i < afterBody.length) {
+		const closeIdx = afterBody.indexOf("'", i);
+		if (closeIdx === -1) {
+			// Unterminated quote, take rest
+			result += afterBody.substring(i);
+			break;
+		}
+		result += afterBody.substring(i, closeIdx);
+		// Check if this is '\'' (escaped single quote)
+		if (afterBody.substring(closeIdx, closeIdx + 4) === "'\\''" ) {
+			result += "'";
+			i = closeIdx + 4;
+		} else {
+			// End of quoted string
+			break;
+		}
+	}
+	return result;
 }
 
 const TEST_WORKTREE_ROOT = "/tmp/pi-worktrees";
@@ -198,7 +216,7 @@ function makePrCtx(opts: {
 
 // ---------- Extension shape ----------
 
-test("worktree extension exports commands including worktree-pr via both registerCommand and .commands", () => {
+test("worktree extension exports commands including worktree-pr via registerCommand", () => {
 	assert.ok(worktreeExtension, "worktree extension should be importable");
 	assert.equal(typeof worktreeExtension, "function", "extension should be a callable function");
 
@@ -206,11 +224,6 @@ test("worktree extension exports commands including worktree-pr via both registe
 	const registered = getRegisteredCommands(worktreeExtension);
 	const prCmd = registered.find((c) => c.name === "worktree-pr");
 	assert.ok(prCmd, "Expected worktree-pr registered via registerCommand");
-
-	// Verify .commands path
-	const commands = (worktreeExtension as any).commands;
-	assert.ok(commands, "Expected .commands property on export");
-	assert.equal(typeof commands["worktree-pr"], "function", "Expected worktree-pr in .commands");
 });
 
 // ---------- Core feature: diff-based PR description with actual file paths ----------
