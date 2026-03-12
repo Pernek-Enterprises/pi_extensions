@@ -1,11 +1,11 @@
-export type PlanningV2Question = {
+export type PlanningQuestion = {
 	id: string;
 	question: string;
 	answer?: string;
 	status: "open" | "answered" | "skipped";
 };
 
-export function extractOpenQuestionsFromRawPlan(markdown: string): PlanningV2Question[] {
+export function extractOpenQuestionsFromRawPlan(markdown: string): PlanningQuestion[] {
 	const lines = markdown.split(/\r?\n/);
 	let start = -1;
 	for (let i = 0; i < lines.length; i++) {
@@ -15,7 +15,7 @@ export function extractOpenQuestionsFromRawPlan(markdown: string): PlanningV2Que
 		}
 	}
 	if (start < 0) return [];
-	const results: PlanningV2Question[] = [];
+	const results: PlanningQuestion[] = [];
 	for (let i = start; i < lines.length; i++) {
 		const line = lines[i].trim();
 		if (!line) continue;
@@ -28,7 +28,7 @@ export function extractOpenQuestionsFromRawPlan(markdown: string): PlanningV2Que
 	return results;
 }
 
-export function mergeQuestions(previous: PlanningV2Question[], next: PlanningV2Question[]): PlanningV2Question[] {
+export function mergeQuestions(previous: PlanningQuestion[], next: PlanningQuestion[]): PlanningQuestion[] {
 	const byQuestion = new Map(previous.map((item) => [item.question.trim().toLowerCase(), item]));
 	return next.map((item, index) => {
 		const existing = byQuestion.get(item.question.trim().toLowerCase());
@@ -41,11 +41,11 @@ export function mergeQuestions(previous: PlanningV2Question[], next: PlanningV2Q
 	});
 }
 
-export function formatQuestionsForFollowup(questions: PlanningV2Question[]): string {
+export function formatQuestionsForFollowup(questions: PlanningQuestion[]): string {
 	return questions.filter((q) => q.status === "open").map((q, i) => `${i + 1}. ${q.question}`).join("\n");
 }
 
-export function formatAnsweredQuestions(questions: PlanningV2Question[]): string {
+export function formatAnsweredQuestions(questions: PlanningQuestion[]): string {
 	return questions
 		.filter((q) => q.answer?.trim())
 		.map((q) => `Q: ${q.question}\nA: ${q.answer?.trim()}`)

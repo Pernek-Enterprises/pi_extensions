@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PlanningV2QnAComponent } from "../../extensions/planning-v2/question-ui.ts";
+import { PlanningQnAComponent } from "../../extensions/planning/question-ui.ts";
 
-test("PlanningV2QnAComponent renders the current question and answer prompt", () => {
-	const component = new PlanningV2QnAComponent([
+test("PlanningQnAComponent renders the current question and answer prompt", () => {
+	const component = new PlanningQnAComponent([
 		{ id: "q-1", question: "Is the bug still reproducible?", status: "open" },
 		{ id: "q-2", question: "Is dashboard config in scope?", status: "open" },
 	], {

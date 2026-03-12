@@ -1,31 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import implementPlanLoopV2Extension, { __testables } from "../../extensions/implement-plan-loop-v2.ts";
-import { buildImplementationLoopArtifactPaths, slugFromContractPath } from "../../extensions/implement-v2/loop-artifacts.ts";
+import implementPlanLoopExtension, { __testables } from "../../extensions/implement-plan-loop.ts";
+import { buildImplementationLoopArtifactPaths, slugFromContractPath } from "../../extensions/implement/loop-artifacts.ts";
 
 test("slugFromContractPath derives a stable slug for implementation loop artifacts", () => {
 	assert.equal(slugFromContractPath(".pi/plans/fix-login.plan.contract.json"), "fix-login");
 });
 
-test("buildImplementationLoopArtifactPaths stages iteration artifacts under .pi/generated-implementation-v2", () => {
+test("buildImplementationLoopArtifactPaths stages iteration artifacts under .pi/generated-implementation", () => {
 	const paths = buildImplementationLoopArtifactPaths("/repo", ".pi/plans/fix-login.plan.contract.json", 2);
-	assert.equal(paths.implementationSummaryPath, "/repo/.pi/generated-implementation-v2/fix-login/iteration-2.implementation-summary.md");
-	assert.equal(paths.reviewJsonPath, "/repo/.pi/generated-implementation-v2/fix-login/iteration-2.review.json");
-	assert.equal(paths.triageJsonPath, "/repo/.pi/generated-implementation-v2/fix-login/iteration-2.triage.json");
-	assert.equal(paths.evidenceBundlePath, "/repo/.pi/generated-implementation-v2/fix-login/iteration-2.evidence-bundle.json");
-	assert.equal(paths.externalValidationPath, "/repo/.pi/generated-implementation-v2/fix-login/iteration-2.external-validation.md");
+	assert.equal(paths.implementationSummaryPath, "/repo/.pi/generated-implementation/fix-login/iteration-2.implementation-summary.md");
+	assert.equal(paths.reviewJsonPath, "/repo/.pi/generated-implementation/fix-login/iteration-2.review.json");
+	assert.equal(paths.triageJsonPath, "/repo/.pi/generated-implementation/fix-login/iteration-2.triage.json");
+	assert.equal(paths.evidenceBundlePath, "/repo/.pi/generated-implementation/fix-login/iteration-2.evidence-bundle.json");
+	assert.equal(paths.externalValidationPath, "/repo/.pi/generated-implementation/fix-login/iteration-2.external-validation.md");
 });
 
-test("implement-plan-loop-v2 registers the expected command surface", () => {
+test("implement-plan-loop registers the expected command surface", () => {
 	const commands: string[] = [];
-	implementPlanLoopV2Extension({
+	implementPlanLoopExtension({
 		registerCommand(name: string) {
 			commands.push(name);
 		},
 		on() {},
 	} as any);
-	assert.deepEqual(commands.sort(), ["end-implement-plan-loop-v2", "implement-plan-loop-v2", "implement-plan-loop-v2-status"]);
+	assert.deepEqual(commands.sort(), ["end-implement-plan-loop", "implement-plan-loop", "implement-plan-loop-status"]);
 });
 
 test("implement loop state helpers persist and clear active state", async () => {
@@ -46,17 +46,17 @@ test("implement loop state helpers persist and clear active state", async () => 
 		slug: "fix-login",
 		status: "preflight" as const,
 		iteration: 0,
-		maxIterations: __testables.IMPLEMENT_LOOP_V2_MAX_ITERATIONS,
+		maxIterations: __testables.IMPLEMENT_LOOP_MAX_ITERATIONS,
 		startedAt: "2026-01-01T00:00:00.000Z",
 		updatedAt: "2026-01-01T00:00:00.000Z",
 		changedFiles: [],
 		iterations: [],
 	};
-	await __testables.applyImplementLoopV2State(ctx, state);
-	assert.deepEqual(__testables.getImplementLoopV2State(ctx), state);
-	await __testables.clearImplementLoopV2State(ctx);
-	assert.equal(__testables.getImplementLoopV2State(ctx), undefined);
-	assert.ok(entryLog.some((entry) => entry.type === "custom" && entry.customType === "implement-plan-loop-v2-session"));
+	await __testables.applyImplementLoopState(ctx, state);
+	assert.deepEqual(__testables.getImplementLoopState(ctx), state);
+	await __testables.clearImplementLoopState(ctx);
+	assert.equal(__testables.getImplementLoopState(ctx), undefined);
+	assert.ok(entryLog.some((entry) => entry.type === "custom" && entry.customType === "implement-plan-loop-session"));
 });
 
 test("extractImplementationSummary prefers explicit summary section", () => {
@@ -65,7 +65,7 @@ test("extractImplementationSummary prefers explicit summary section", () => {
 });
 
 test("parseChangedFilesFromPorcelain preserves file names and excludes .pi paths", () => {
-	const changed = __testables.parseChangedFilesFromPorcelain([" M index.html", " M src/App.tsx", "?? .pi/generated-implementation-v2/foo/bar.md", "?? app.html"].join("\n"));
+	const changed = __testables.parseChangedFilesFromPorcelain([" M index.html", " M src/App.tsx", "?? .pi/generated-implementation/foo/bar.md", "?? app.html"].join("\n"));
 	assert.deepEqual(changed, ["index.html", "src/App.tsx", "app.html"]);
 });
 

@@ -1,22 +1,22 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { extractExecutionContract } from "./planning-v2/contract-extractor.ts";
-import { buildExecutionContractPath, buildRawPlanPath, renderRawPlanMarkdown } from "./planning-v2/raw-artifact.ts";
-import { renderMarkdownFromExecutionContract } from "./planning-v2/contract-render.ts";
-import type { ExecutionContract } from "./planning-v2/contract-schema.ts";
+import { extractExecutionContract } from "./planning/contract-extractor.ts";
+import { buildExecutionContractPath, buildRawPlanPath, renderRawPlanMarkdown } from "./planning/raw-artifact.ts";
+import { renderMarkdownFromExecutionContract } from "./planning/contract-render.ts";
+import type { ExecutionContract } from "./planning/contract-schema.ts";
 import {
 	extractOpenQuestionsFromRawPlan,
 	formatAnsweredQuestions,
 	formatQuestionsForFollowup,
 	mergeQuestions,
-	type PlanningV2Question,
-} from "./planning-v2/question-loop.ts";
-import { PlanningV2QnAComponent } from "./planning-v2/question-ui.ts";
+	type PlanningQuestion,
+} from "./planning/question-loop.ts";
+import { PlanningQnAComponent } from "./planning/question-ui.ts";
 
 type RelevantFile = { path: string; reason: string };
 
-type PlanningV2State = {
+type PlanningState = {
 	active: boolean;
 	title: string;
 	slug: string;
@@ -25,13 +25,13 @@ type PlanningV2State = {
 	repoContextSummary?: string;
 	relevantFiles: RelevantFile[];
 	rawDraft?: string;
-	questions: PlanningV2Question[];
+	questions: PlanningQuestion[];
 	contract?: ExecutionContract;
 	savedPath?: string;
 	savedContractPath?: string;
 };
 
-const PLANNING_V2_STATE_TYPE = "planning-v2-session";
+const PLANNING_STATE_TYPE = "planning-session";
 
 function slugify(input: string): string {
 	return input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "plan";
@@ -43,8 +43,8 @@ function notify(ctx: any, message: string, level: "info" | "warning" | "error" =
 	else if (typeof ctx?.pi?.sendMessage === "function") ctx.pi.sendMessage({ content: message, display: true }, { triggerTurn: false });
 }
 
-function getState(ctx: any): PlanningV2State | undefined {
-	return ctx?.state?.planningV2;
+function getState(ctx: any): PlanningState | undefined {
+	return ctx?.state?.planning;
 }
 
 function appendCustomEntry(target: any, customType: string, data: unknown) {
@@ -57,37 +57,37 @@ function appendCustomEntry(target: any, customType: string, data: unknown) {
 function getCustomEntryData(entry: any): any | undefined {
 	if (!entry) return undefined;
 	if (entry.type === "custom" && Object.prototype.hasOwnProperty.call(entry, "data")) return entry.data;
-	if (entry.type === PLANNING_V2_STATE_TYPE && Object.prototype.hasOwnProperty.call(entry, "value")) return entry.value;
+	if (entry.type === PLANNING_STATE_TYPE && Object.prototype.hasOwnProperty.call(entry, "value")) return entry.value;
 	return undefined;
 }
 
-function setState(ctx: any, state: PlanningV2State | undefined) {
+function setState(ctx: any, state: PlanningState | undefined) {
 	if (!ctx.state) ctx.state = {};
-	ctx.state.planningV2 = state;
+	ctx.state.planning = state;
 }
 
-function loadPersistedState(ctx: any): PlanningV2State | undefined {
+function loadPersistedState(ctx: any): PlanningState | undefined {
 	const entries = ctx?.sessionManager?.getEntries?.() ?? [];
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (!(entry?.type === "custom" && entry?.customType === PLANNING_V2_STATE_TYPE) && entry?.type !== PLANNING_V2_STATE_TYPE) continue;
+		if (!(entry?.type === "custom" && entry?.customType === PLANNING_STATE_TYPE) && entry?.type !== PLANNING_STATE_TYPE) continue;
 		const data = getCustomEntryData(entry);
 		if (!data || data.active === false) return undefined;
-		setState(ctx, data as PlanningV2State);
-		return data as PlanningV2State;
+		setState(ctx, data as PlanningState);
+		return data as PlanningState;
 	}
 	return undefined;
 }
 
-async function applyState(ctx: any, state: PlanningV2State): Promise<PlanningV2State> {
+async function applyState(ctx: any, state: PlanningState): Promise<PlanningState> {
 	setState(ctx, state);
-	appendCustomEntry(ctx.pi ?? ctx, PLANNING_V2_STATE_TYPE, state);
+	appendCustomEntry(ctx.pi ?? ctx, PLANNING_STATE_TYPE, state);
 	return state;
 }
 
 async function clearState(ctx: any): Promise<void> {
 	setState(ctx, undefined);
-	appendCustomEntry(ctx.pi ?? ctx, PLANNING_V2_STATE_TYPE, { active: false });
+	appendCustomEntry(ctx.pi ?? ctx, PLANNING_STATE_TYPE, { active: false });
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -117,7 +117,7 @@ async function collectRepoSummary(repoRoot: string): Promise<{ repoContextSummar
 	};
 }
 
-async function maybeAskClarifyingQuestions(pi: ExtensionAPI, state: PlanningV2State): Promise<void> {
+async function maybeAskClarifyingQuestions(pi: ExtensionAPI, state: PlanningState): Promise<void> {
 	const openQuestions = state.questions.filter((question) => question.status === "open");
 	if (openQuestions.length === 0) return;
 	if (typeof pi.sendUserMessage !== "function") return;
@@ -164,7 +164,7 @@ export const __testables = {
 	clearState,
 };
 
-export default function planV2Extension(pi: ExtensionAPI) {
+export default function planExtension(pi: ExtensionAPI) {
 	pi.on?.("session_start", async (_event, ctx) => {
 		loadPersistedState(ctx);
 	});
@@ -175,12 +175,12 @@ export default function planV2Extension(pi: ExtensionAPI) {
 		loadPersistedState(ctx);
 	});
 
-	pi.registerCommand("plan-v2", {
-		description: "Start a clean-slate v2 planning session",
+	pi.registerCommand("plan", {
+		description: "Start a clean-slate planning session",
 		handler: async (args, ctx) => {
 			const input = (args ?? "").trim();
 			if (!input) {
-				notify(ctx, "Usage: /plan-v2 <feature brief>", "warning");
+				notify(ctx, "Usage: /plan <feature brief>", "warning");
 				return;
 			}
 			notify(ctx, "Collecting planning context...", "info");
@@ -191,7 +191,7 @@ export default function planV2Extension(pi: ExtensionAPI) {
 				requestedFeature: input,
 				repoContextSummary,
 			});
-			const state: PlanningV2State = {
+			const state: PlanningState = {
 				active: true,
 				title: input.charAt(0).toUpperCase() + input.slice(1),
 				slug: slugify(input),
@@ -203,10 +203,10 @@ export default function planV2Extension(pi: ExtensionAPI) {
 				questions: extractOpenQuestionsFromRawPlan(initialDraft),
 			};
 			await applyState({ ...ctx, pi }, state);
-			notify(ctx, "Planning v2 started. Refine the raw plan, then run /plan-save-v2.", "info");
+			notify(ctx, "Planning started. Refine the raw plan, then run /plan-save.", "info");
 			if (typeof pi.sendUserMessage === "function") {
 				pi.sendUserMessage([
-					"You are in planning v2 mode.",
+					"You are in planning mode.",
 					"Produce a rich raw plan artifact in markdown.",
 					"Do not force one rigid schema.",
 					"Be explicit about evidence, intended behavior, ambiguities, and checks.",
@@ -234,12 +234,12 @@ export default function planV2Extension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.registerCommand("plan-answer-v2", {
-		description: "Provide answers to open v2 planning questions",
+	pi.registerCommand("plan-answer", {
+		description: "Provide answers to open planning questions",
 		handler: async (args, ctx) => {
 			const state = getState(ctx) ?? loadPersistedState(ctx);
 			if (!state?.active) {
-				notify(ctx, "No active v2 planning session.", "warning");
+				notify(ctx, "No active planning session.", "warning");
 				return;
 			}
 			const applyAnswers = async (input: string) => {
@@ -261,21 +261,21 @@ export default function planV2Extension(pi: ExtensionAPI) {
 				await applyState({ ...ctx, pi }, { ...state, questions: nextQuestions });
 				if (typeof pi.sendMessage === "function") {
 					pi.sendMessage({
-						customType: "planning-v2-answers",
-						content: "I answered the v2 planning questions:\n\n" + formatAnsweredQuestions(nextQuestions),
+						customType: "planning-answers",
+						content: "I answered the planning questions:\n\n" + formatAnsweredQuestions(nextQuestions),
 						display: true,
 					}, { triggerTurn: true });
 				}
-				notify(ctx, "Saved v2 planning answers and asked the planner to continue.", "info");
+				notify(ctx, "Saved planning answers and asked the planner to continue.", "info");
 			};
 			const input = (args ?? "").trim();
 			if (!input && ctx.hasUI && typeof ctx.ui.custom === "function") {
 				const openQuestions = state.questions.filter((q) => q.status === "open");
 				if (openQuestions.length === 0) {
-					notify(ctx, "No open v2 planning questions.", "info");
+					notify(ctx, "No open planning questions.", "info");
 					return;
 				}
-				const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => new PlanningV2QnAComponent(openQuestions, tui, done));
+				const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => new PlanningQnAComponent(openQuestions, tui, done));
 				if (answersResult === null) {
 					notify(ctx, "Cancelled", "info");
 					return;
@@ -284,15 +284,15 @@ export default function planV2Extension(pi: ExtensionAPI) {
 				return;
 			}
 			if (!input) {
-				notify(ctx, "Usage: /plan-answer-v2 Q: <question>\nA: <answer> ...", "warning");
+				notify(ctx, "Usage: /plan-answer Q: <question>\nA: <answer> ...", "warning");
 				return;
 			}
 			await applyAnswers(input);
 		},
 	});
 
-	pi.registerCommand("plan-save-v2", {
-		description: "Save the raw v2 plan and extract an execution contract",
+	pi.registerCommand("plan-save", {
+		description: "Save the raw plan and extract an execution contract",
 		handler: async (args, ctx) => {
 			const state = getState(ctx) ?? loadPersistedState(ctx);
 			try {
@@ -328,7 +328,7 @@ export default function planV2Extension(pi: ExtensionAPI) {
 					title = state.title;
 					originalInput = state.originalInput;
 				} else {
-					notify(ctx, "No active v2 planning draft to save. Pass a .plan.md path to /plan-save-v2 or start /plan-v2 first.", "warning");
+					notify(ctx, "No active planning draft to save. Pass a .plan.md path to /plan-save or start /plan first.", "warning");
 					return;
 				}
 
@@ -388,44 +388,43 @@ export default function planV2Extension(pi: ExtensionAPI) {
 					notify(ctx, `Execution contract is ready. Advisory notes: ${finalContract.advisoryNotes.join(" ")}`, "info");
 				}
 			} catch (error) {
-				notify(ctx, `plan-save-v2 failed: ${(error as Error).message}`, "error");
+				notify(ctx, `plan-save failed: ${(error as Error).message}`, "error");
 			}
 		},
 	});
 
-	pi.registerCommand("plan-status-v2", {
-		description: "Show the current v2 planning state",
+	pi.registerCommand("plan-status", {
+		description: "Show the current planning state",
 		handler: async (_args, ctx) => {
 			const state = getState(ctx) ?? loadPersistedState(ctx);
 			if (!state?.active) {
-				notify(ctx, "No active v2 planning session.", "warning");
+				notify(ctx, "No active planning session.", "warning");
 				return;
 			}
 			const openQuestions = state.questions.filter((q) => q.status === "open").length;
 			const answeredQuestions = state.questions.filter((q) => q.status === "answered").length;
 			const contractStatus = state.contract ? ` | contract: ${state.contract.status}` : "";
-			notify(ctx, `V2 planning active: ${state.title} | open questions: ${openQuestions} | answered: ${answeredQuestions}${contractStatus}`, "info");
+			notify(ctx, `Planning active: ${state.title} | open questions: ${openQuestions} | answered: ${answeredQuestions}${contractStatus}`, "info");
 		},
 	});
 
-	pi.registerCommand("plan-tests-v2", {
-		description: "Suggest the next TDD step from v2 planning",
+	pi.registerCommand("plan-next", {
+		description: "Show the saved execution contract path for the next implementation step",
 		handler: async (_args, ctx) => {
 			const state = getState(ctx) ?? loadPersistedState(ctx);
 			if (!state?.savedContractPath) {
-				notify(ctx, "Save the v2 plan first with /plan-save-v2.", "warning");
+				notify(ctx, "No saved execution contract. Run /plan-save first.", "warning");
 				return;
 			}
-			const command = `/tdd-plan ${state.savedContractPath}`;
-			notify(ctx, `Next step: run ${command}`, "info");
+			notify(ctx, `Saved execution contract: ${state.savedContractPath}`, "info");
 		},
 	});
 
-	pi.registerCommand("end-planning-v2", {
-		description: "End the active v2 planning session",
+	pi.registerCommand("end-planning", {
+		description: "End the active planning session",
 		handler: async (_args, ctx) => {
 			await clearState({ ...ctx, pi });
-			notify(ctx, "Planning v2 ended.", "info");
+			notify(ctx, "Planning ended.", "info");
 		},
 	});
 }

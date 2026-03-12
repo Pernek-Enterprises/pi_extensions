@@ -1,0 +1,27 @@
+{
+  "nextState": "gathering-evidence",
+  "reason": "Current blockers are primarily evidence gaps; gather stronger repo-grounded proof before changing code again.",
+  "blockerSignatures": [
+    "evidence|coverage|CHK-2,CHK-4,CHK-5,REQ-10,REQ-11,REQ-12,REQ-13|__tests__/extensions/implement-plan-loop.test.ts,__tests__/extensions/plan.test.ts,extensions/implement-plan-loop.ts,extensions/implement/loop-state.ts,extensions/plan.ts,extensions/planning/question-loop.ts|cannot verify v2 suffix removal in renamed source and test files"
+  ],
+  "implementationBlockingCount": 0,
+  "evidenceBlockingCount": 1,
+  "externalValidationBlockingCount": 0,
+  "targetIds": [
+    "REQ-10",
+    "REQ-11",
+    "REQ-12",
+    "REQ-13",
+    "CHK-2",
+    "CHK-4",
+    "CHK-5"
+  ],
+  "targetFiles": [
+    "extensions/plan.ts",
+    "extensions/implement-plan-loop.ts",
+    "extensions/planning/question-loop.ts",
+    "extensions/implement/loop-state.ts",
+    "__tests__/extensions/plan.test.ts",
+    "__tests__/extensions/implement-plan-loop.test.ts"
+  ]
+}
