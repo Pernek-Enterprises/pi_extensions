@@ -1,0 +1,256 @@
+{
+  "artifactType": "execution-contract",
+  "version": 1,
+  "generatedAt": "2025-01-21T00:00:00Z",
+  "source": {
+    "rawArtifactPath": ".pi/plans/we-have-recenlty-improved-planning-with-planning-v2-implemen.plan.md",
+    "rawArtifactKind": "markdown"
+  },
+  "goal": "Delete the two legacy planning/TDD extensions (plan-feature.ts, tdd-plan.ts) and clean up all associated artifacts. Replace /plan-tests-v2 with /plan-next. Drop the v2 suffix from all remaining planning and implementation extension file names, directory names, command names, type names, and string literals.",
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "text": "Delete extensions/plan-feature.ts",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 1 — legacy file deletion"
+    },
+    {
+      "id": "REQ-2",
+      "text": "Delete extensions/tdd-plan.ts",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 1 — legacy file deletion"
+    },
+    {
+      "id": "REQ-3",
+      "text": "Delete docs/plan-feature-spec.md",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 1 — legacy file deletion"
+    },
+    {
+      "id": "REQ-4",
+      "text": "Delete __tests__/extensions/tdd-plan.test.ts",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 1 — legacy file deletion"
+    },
+    {
+      "id": "REQ-5",
+      "text": "Delete __tests__/extensions/tdd-plan-loop.test.ts",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 1 — legacy file deletion"
+    },
+    {
+      "id": "REQ-6",
+      "text": "Delete __tests__/extensions/plan-feature-spec.plan.test.ts",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 1 — legacy file deletion"
+    },
+    {
+      "id": "REQ-7",
+      "text": "Delete __tests__/extensions/currently-while-during-planning-there-is-a-active-planning-w.plan.test.ts (imports directly from plan-feature.ts; will not compile after deletion)",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 1 — legacy file deletion"
+    },
+    {
+      "id": "REQ-8",
+      "text": "Rename extensions/plan-v2.ts → extensions/plan.ts, extensions/planning-v2/ → extensions/planning/, extensions/implement-v2/ → extensions/implement/, extensions/implement-plan-loop-v2.ts → extensions/implement-plan-loop.ts",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 2 — file/directory renames"
+    },
+    {
+      "id": "REQ-9",
+      "text": "Rename __tests__/extensions/plan-v2.test.ts → plan.test.ts, implement-plan-loop-v2.test.ts → implement-plan-loop.test.ts, planning-v2-question-ui.test.ts → planning-question-ui.test.ts",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 2 — test file renames"
+    },
+    {
+      "id": "REQ-10",
+      "text": "In extensions/plan.ts, rename commands: /plan-v2 → /plan, /plan-save-v2 → /plan-save, /plan-answer-v2 → /plan-answer, /plan-status-v2 → /plan-status, /end-planning-v2 → /end-planning. Replace /plan-tests-v2 with /plan-next (shows saved execution contract path via state.savedContractPath; warns to run /plan-save first if none saved).",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Phase 3 — command renames in plan.ts"
+    },
+    {
+      "id": "REQ-11",
+      "text": "In extensions/implement-plan-loop.ts, rename commands: /implement-plan-loop-v2 → /implement-plan-loop, /implement-plan-loop-v2-status → /implement-plan-loop-status, /end-implement-plan-loop-v2 → /end-implement-plan-loop",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Phase 4 — command renames in implement-plan-loop.ts"
+    },
+    {
+      "id": "REQ-12",
+      "text": "Update all import paths: ./planning-v2/ → ./planning/, ./implement-v2/ → ./implement/. Rename types: PlanningV2State → PlanningState, PlanningV2Question → PlanningQuestion, PlanningV2QnAComponent → PlanningQnAComponent, ImplementPlanLoopV2Status → ImplementPlanLoopStatus, ImplementPlanLoopV2NextState → ImplementPlanLoopNextState, ImplementPlanLoopV2Iteration → ImplementPlanLoopIteration, ImplementPlanLoopV2State → ImplementPlanLoopState. Rename constants: PLANNING_V2_STATE_TYPE → PLANNING_STATE_TYPE (value 'planning-session'), IMPLEMENT_LOOP_V2_STATE_TYPE → IMPLEMENT_LOOP_STATE_TYPE (value 'implement-plan-loop-session'), planV2Extension → planExtension, implementPlanLoopV2Extension → implementPlanLoopExtension. Rename state keys: ctx.state.planningV2 → ctx.state.planning, ctx.state.implementPlanLoopV2 → ctx.state.implementPlanLoop. Rename custom entry types: 'planning-v2-answers' → 'planning-answers', 'planning-v2-session' → 'planning-session', 'implement-plan-loop-v2-session' → 'implement-plan-loop-session', 'implement-plan-loop-v2' → 'implement-plan-loop', 'implement-plan-loop-v2-status' → 'implement-plan-loop-status'. Rename artifact dir: '.pi/generated-implementation-v2' → '.pi/generated-implementation'. Drop 'v2' from all user-facing strings and descriptions.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Phase 5 — internal code references"
+    },
+    {
+      "id": "REQ-13",
+      "text": "Update test files (plan.test.ts, implement-plan-loop.test.ts, planning-question-ui.test.ts): fix import paths, expected command name assertions, and artifact path assertions to match the renamed source files and dropped v2 suffix",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Phase 6 — test file updates"
+    },
+    {
+      "id": "REQ-14",
+      "text": "Edit README.md: remove the extensions/plan-feature.ts section (lines 20-36), the extensions/tdd-plan.ts section (lines 37-42), and their repo layout entries (lines 66-68). Add brief sections describing the planning extensions (plan.ts, planning/, implement/, implement-plan-loop.ts) and update the repo layout — all without v2 suffix.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Phase 7 — README update"
+    },
+    {
+      "id": "REQ-15",
+      "text": "Do NOT modify package.json (uses directory glob './extensions', no per-file entries)",
+      "kind": "operational",
+      "priority": "secondary",
+      "source": "Constraints"
+    },
+    {
+      "id": "REQ-16",
+      "text": "Do NOT modify .pi/plans/ or .pi/generated-tdd/ historical artifacts",
+      "kind": "operational",
+      "priority": "secondary",
+      "source": "Constraints"
+    }
+  ],
+  "checks": [
+    {
+      "id": "CHK-1",
+      "text": "grep -r 'plan-feature\\|tdd-plan' extensions/ __tests__/ docs/ README.md returns zero results",
+      "kind": "verification",
+      "source": "Verification — legacy references removed"
+    },
+    {
+      "id": "CHK-2",
+      "text": "grep -rn '\\-v2\\|_v2\\|V2\\| v2' extensions/ __tests__/ README.md returns zero results (confirms all v2 suffixes removed from source and tests)",
+      "kind": "verification",
+      "source": "Verification — v2 suffix fully dropped"
+    },
+    {
+      "id": "CHK-3",
+      "text": "npm test (or equivalent) passes with remaining tests",
+      "kind": "test",
+      "source": "Verification — tests pass"
+    },
+    {
+      "id": "CHK-4",
+      "text": "/plan-next command is registered in extensions/plan.ts and shows the execution contract path",
+      "kind": "verification",
+      "source": "Verification — new command"
+    },
+    {
+      "id": "CHK-5",
+      "text": "No remaining -v2 command registrations in any extension file",
+      "kind": "verification",
+      "source": "Verification — command renames complete"
+    },
+    {
+      "id": "CHK-6",
+      "text": "All 7 legacy files no longer exist on disk",
+      "kind": "verification",
+      "source": "Verification — deletions"
+    },
+    {
+      "id": "CHK-7",
+      "text": "All 7 file/directory renames completed (no -v2 files/dirs remain under extensions/ or __tests__/)",
+      "kind": "verification",
+      "source": "Verification — renames"
+    }
+  ],
+  "ambiguities": [
+    {
+      "id": "AMB-1",
+      "text": "The exact content for the new README sections (plan.ts, planning/, implement/, implement-plan-loop.ts descriptions and updated repo layout) is not specified — the implementer must draft appropriate descriptions based on the actual extension files.",
+      "blocksExecution": false,
+      "source": "Phase 7 — README update"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "extensions/plan-feature.ts",
+      "reason": "Legacy extension to delete (1447 lines)"
+    },
+    {
+      "path": "extensions/tdd-plan.ts",
+      "reason": "Legacy extension to delete (2454 lines)"
+    },
+    {
+      "path": "docs/plan-feature-spec.md",
+      "reason": "Associated doc to delete (830 lines)"
+    },
+    {
+      "path": "__tests__/extensions/tdd-plan.test.ts",
+      "reason": "Dedicated test file to delete (376 lines)"
+    },
+    {
+      "path": "__tests__/extensions/tdd-plan-loop.test.ts",
+      "reason": "Dedicated test file to delete (504 lines)"
+    },
+    {
+      "path": "__tests__/extensions/plan-feature-spec.plan.test.ts",
+      "reason": "Dedicated test file to delete (935 lines)"
+    },
+    {
+      "path": "__tests__/extensions/currently-while-during-planning-there-is-a-active-planning-w.plan.test.ts",
+      "reason": "Test file importing __testables from plan-feature.ts — must be deleted"
+    },
+    {
+      "path": "extensions/plan-v2.ts",
+      "reason": "To be renamed to plan.ts; commands, types, state keys, strings all need v2 dropped"
+    },
+    {
+      "path": "extensions/planning-v2/",
+      "reason": "Directory to rename to planning/; type names PlanningV2Question, PlanningV2QnAComponent to rename"
+    },
+    {
+      "path": "extensions/implement-v2/",
+      "reason": "Directory to rename to implement/; type names, state constants, artifact paths to rename"
+    },
+    {
+      "path": "extensions/implement-plan-loop-v2.ts",
+      "reason": "To be renamed to implement-plan-loop.ts; commands and internal references to rename"
+    },
+    {
+      "path": "__tests__/extensions/plan-v2.test.ts",
+      "reason": "To be renamed to plan.test.ts; imports and command assertions to update"
+    },
+    {
+      "path": "__tests__/extensions/implement-plan-loop-v2.test.ts",
+      "reason": "To be renamed to implement-plan-loop.test.ts; imports and assertions to update"
+    },
+    {
+      "path": "__tests__/extensions/planning-v2-question-ui.test.ts",
+      "reason": "To be renamed to planning-question-ui.test.ts; import path to update"
+    },
+    {
+      "path": "README.md",
+      "reason": "Contains documentation for legacy extensions — to be updated with new names"
+    },
+    {
+      "path": "package.json",
+      "reason": "Confirmed safe — uses directory glob, no per-file references"
+    }
+  ],
+  "outOfScope": [
+    "Modifying package.json",
+    "Modifying .pi/plans/ historical plan artifacts",
+    "Modifying .pi/generated-tdd/ historical TDD loop artifacts",
+    "Any functional changes to remaining extensions beyond renaming and the /plan-next addition"
+  ],
+  "status": "ready",
+  "contractIssues": [],
+  "advisoryNotes": [
+    "Execution order: (1) delete 7 legacy files, (2) rename 4 extension files/dirs and 3 test files, (3) update all command names, types, imports, state keys, and strings to drop v2, (4) add /plan-next command, (5) update README, (6) run verification checks.",
+    "The README content is left to the implementer's discretion — review the actual extension files to write accurate descriptions.",
+    "Line numbers referenced in the plan may drift; use content matching rather than relying on exact line numbers.",
+    "The v2 grep check (CHK-2) should exclude .pi/ directory which contains historical artifacts that are intentionally not modified."
+  ]
+}

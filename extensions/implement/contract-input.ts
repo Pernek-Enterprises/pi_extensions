@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { ExecutionContract } from "../planning-v2/contract-schema.ts";
-import { validateExecutionContract } from "../planning-v2/contract-validator.ts";
+import type { ExecutionContract } from "../planning/contract-schema.ts";
+import { validateExecutionContract } from "../planning/contract-validator.ts";
 
 async function exists(filePath: string): Promise<boolean> {
 	try {
@@ -38,12 +38,12 @@ export async function loadReadyImplementationContract(cwd: string, inputPath: st
 }> {
 	const absolutePath = path.resolve(cwd, inputPath);
 	if (!(await exists(absolutePath))) throw new Error(`Execution contract not found: ${absolutePath}`);
-	if (!/\.plan\.contract\.json$/i.test(absolutePath)) throw new Error("implement-plan-loop-v2 currently accepts only .plan.contract.json input.");
+	if (!/\.plan\.contract\.json$/i.test(absolutePath)) throw new Error("implement-plan-loop currently accepts only .plan.contract.json input.");
 	const raw = await fs.readFile(absolutePath, "utf8");
 	const parsed = parseJson<ExecutionContract>(raw);
 	if (!parsed) throw new Error(`Invalid execution contract JSON: ${absolutePath}`);
 	const contract = validateExecutionContract(parsed);
-	if (contract.status === "blocked") throw new Error("Execution contract is blocked. Resolve blocking ambiguities before running /implement-plan-loop-v2.");
+	if (contract.status === "blocked") throw new Error("Execution contract is blocked. Resolve blocking ambiguities before running /implement-plan-loop.");
 	if (contract.status !== "ready") throw new Error(`Execution contract is not ready: ${contract.contractIssues.join(" ")}`.trim());
 	const repoRoot = await detectRepoRoot(path.dirname(absolutePath));
 	return {

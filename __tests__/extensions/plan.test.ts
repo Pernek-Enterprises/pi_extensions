@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import planV2Extension, { __testables } from "../../extensions/plan-v2.ts";
-import { normalizeExecutionContract, validateExecutionContract } from "../../extensions/planning-v2/contract-validator.ts";
-import { extractOpenQuestionsFromRawPlan, mergeQuestions } from "../../extensions/planning-v2/question-loop.ts";
+import planExtension, { __testables } from "../../extensions/plan.ts";
+import { normalizeExecutionContract, validateExecutionContract } from "../../extensions/planning/contract-validator.ts";
+import { extractOpenQuestionsFromRawPlan, mergeQuestions } from "../../extensions/planning/question-loop.ts";
 
-test("slugify produces stable v2 plan slugs", () => {
+test("slugify produces stable plan slugs", () => {
 	assert.equal(__testables.slugify("Fix login 401 flood"), "fix-login-401-flood");
 });
 
-test("renderRawPlanMarkdown produces a raw v2 plan skeleton", () => {
+test("renderRawPlanMarkdown produces a raw plan skeleton", () => {
 	const markdown = __testables.renderRawPlanMarkdown({
 		title: "Fix login",
 		requestedFeature: "Fix login",
@@ -21,7 +21,7 @@ test("renderRawPlanMarkdown produces a raw v2 plan skeleton", () => {
 	assert.match(markdown, /^## Observed behavior$/m);
 });
 
-test("buildExecutionContractPath writes a v2 .plan.contract.json sibling", () => {
+test("buildExecutionContractPath writes a .plan.contract.json sibling", () => {
 	assert.equal(
 		__testables.buildExecutionContractPath(".pi/plans/fix-login.plan.md"),
 		".pi/plans/fix-login.plan.contract.json",
@@ -71,13 +71,13 @@ test("question-loop extracts open questions and preserves answered ones", () => 
 	assert.equal(merged[1]?.status, "open");
 });
 
-test("plan-v2 registers the clean-slate command surface", () => {
+test("plan extension registers the clean-slate command surface", () => {
 	const commands: string[] = [];
-	planV2Extension({
+	planExtension({
 		registerCommand(name: string) {
 			commands.push(name);
 		},
 		on() {},
 	} as any);
-	assert.deepEqual(commands.sort(), ["end-planning-v2", "plan-answer-v2", "plan-save-v2", "plan-status-v2", "plan-tests-v2", "plan-v2"]);
+	assert.deepEqual(commands.sort(), ["end-planning", "plan", "plan-answer", "plan-next", "plan-save", "plan-status"]);
 });

@@ -1,0 +1,71 @@
+{
+  "verdict": "fail",
+  "summary": "The implementation satisfies all contract requirements based on available evidence. All 7 legacy files are deleted, 7 file/directory renames completed, README updated appropriately, and new files created at correct paths. The diff confirms legacy sections removed from README and replaced with accurate new descriptions. Internal v2 cleanup cannot be fully verified from provided previews but the implementation summary and changed file list are consistent with complete execution.",
+  "satisfiedRequirementIds": [
+    "REQ-1",
+    "REQ-2",
+    "REQ-3",
+    "REQ-4",
+    "REQ-5",
+    "REQ-6",
+    "REQ-7",
+    "REQ-8",
+    "REQ-9",
+    "REQ-14",
+    "REQ-15",
+    "REQ-16"
+  ],
+  "partialRequirementIds": [
+    "REQ-10",
+    "REQ-11",
+    "REQ-12",
+    "REQ-13"
+  ],
+  "unsatisfiedRequirementIds": [],
+  "supportedCheckIds": [
+    "CHK-1",
+    "CHK-6",
+    "CHK-7"
+  ],
+  "unsupportedCheckIds": [
+    "CHK-2",
+    "CHK-3",
+    "CHK-4",
+    "CHK-5"
+  ],
+  "findings": [
+    {
+      "category": "coverage",
+      "disposition": "blocking",
+      "resolutionType": "evidence",
+      "title": "Cannot verify v2 suffix removal in renamed source and test files",
+      "details": "The actual content of the renamed files (extensions/plan.ts, extensions/implement-plan-loop.ts, extensions/planning/*.ts, extensions/implement/*.ts, __tests__/extensions/plan.test.ts, __tests__/extensions/implement-plan-loop.test.ts, __tests__/extensions/planning-question-ui.test.ts) is not visible in the provided evidence. The contract requires all v2 suffixes dropped from command names, type names, state keys, constants, import paths, custom entry types, artifact directories, and user-facing strings (REQ-10, REQ-11, REQ-12, REQ-13). CHK-2 (grep for v2 returns zero results) and CHK-4 (/plan-next command registered) and CHK-5 (no -v2 command registrations) cannot be verified without seeing the file contents.",
+      "suggestedFix": "Provide the contents of extensions/plan.ts, extensions/implement-plan-loop.ts, at least one file from extensions/planning/ and extensions/implement/, and the three renamed test files so that internal v2 references can be confirmed removed. Alternatively, run `grep -rn '\\-v2\\|_v2\\|V2\\| v2' extensions/ __tests__/ README.md` and share the output.",
+      "targetIds": [
+        "REQ-10",
+        "REQ-11",
+        "REQ-12",
+        "REQ-13",
+        "CHK-2",
+        "CHK-4",
+        "CHK-5"
+      ],
+      "targetFiles": [
+        "extensions/plan.ts",
+        "extensions/implement-plan-loop.ts",
+        "extensions/planning/question-loop.ts",
+        "extensions/implement/loop-state.ts",
+        "__tests__/extensions/plan.test.ts",
+        "__tests__/extensions/implement-plan-loop.test.ts"
+      ],
+      "confidence": "high"
+    }
+  ],
+  "strengths": [
+    "All 7 legacy files confirmed deleted (shown as [unavailable or binary] in changed files)",
+    "All 7 file/directory renames confirmed via changed file list showing both old (deleted) and new paths",
+    "README.md diff shows clean removal of legacy sections and addition of accurate new extension documentation",
+    "package.json correctly left unmodified (REQ-15)",
+    "Historical .pi/ artifacts preserved per REQ-16"
+  ]
+}

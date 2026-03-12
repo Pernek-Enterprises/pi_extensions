@@ -9,10 +9,10 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../lib/pi-tui-compat.ts";
-import type { PlanningV2Question } from "./question-loop.ts";
+import type { PlanningQuestion } from "./question-loop.ts";
 
-export class PlanningV2QnAComponent implements Component {
-	private questions: PlanningV2Question[];
+export class PlanningQnAComponent implements Component {
+	private questions: PlanningQuestion[];
 	private answers: string[];
 	private currentIndex = 0;
 	private editor: Editor;
@@ -29,7 +29,7 @@ export class PlanningV2QnAComponent implements Component {
 	private yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 	private gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
 
-	constructor(questions: PlanningV2Question[], tui: TUI, onDone: (value: string | null) => void) {
+	constructor(questions: PlanningQuestion[], tui: TUI, onDone: (value: string | null) => void) {
 		this.questions = questions;
 		this.answers = questions.map((q) => q.answer ?? "");
 		this.tui = tui;

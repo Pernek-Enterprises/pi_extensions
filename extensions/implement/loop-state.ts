@@ -1,4 +1,4 @@
-export type ImplementPlanLoopV2Status =
+export type ImplementPlanLoopStatus =
 	| "preflight"
 	| "implementing"
 	| "reviewing"
@@ -10,14 +10,14 @@ export type ImplementPlanLoopV2Status =
 	| "failed"
 	| "cancelled";
 
-export type ImplementPlanLoopV2NextState =
+export type ImplementPlanLoopNextState =
 	| "repairing"
 	| "gathering-evidence"
 	| "awaiting-external-validation"
 	| "completed"
 	| "failed";
 
-export type ImplementPlanLoopV2Iteration = {
+export type ImplementPlanLoopIteration = {
 	iteration: number;
 	mode: "implementing" | "repairing" | "gathering-evidence";
 	implementationSummaryPath?: string;
@@ -39,15 +39,15 @@ export type ImplementPlanLoopV2Iteration = {
 	targetFiles: string[];
 	changedFiles: string[];
 	blockerSignatures: string[];
-	triageDecision?: ImplementPlanLoopV2NextState;
+	triageDecision?: ImplementPlanLoopNextState;
 };
 
-export type ImplementPlanLoopV2State = {
+export type ImplementPlanLoopState = {
 	active: boolean;
 	repoRoot: string;
 	contractPath: string;
 	slug: string;
-	status: ImplementPlanLoopV2Status;
+	status: ImplementPlanLoopStatus;
 	iteration: number;
 	maxIterations: number;
 	startedAt: string;
@@ -58,13 +58,13 @@ export type ImplementPlanLoopV2State = {
 	lastEvidenceSummary?: string;
 	lastBlockingCount?: number;
 	lastAdvisoryCount?: number;
-	lastTriageDecision?: ImplementPlanLoopV2NextState;
+	lastTriageDecision?: ImplementPlanLoopNextState;
 	lastTransitionReason?: string;
 	changedFiles: string[];
-	iterations: ImplementPlanLoopV2Iteration[];
+	iterations: ImplementPlanLoopIteration[];
 };
 
-const IMPLEMENT_LOOP_V2_STATE_TYPE = "implement-plan-loop-v2-session";
+const IMPLEMENT_LOOP_STATE_TYPE = "implement-plan-loop-session";
 
 function appendCustomEntry(target: any, customType: string, data: unknown) {
 	const appendEntry = target?.appendEntry;
@@ -76,40 +76,40 @@ function appendCustomEntry(target: any, customType: string, data: unknown) {
 function getCustomEntryData(entry: any): any | undefined {
 	if (!entry) return undefined;
 	if (entry.type === "custom" && Object.prototype.hasOwnProperty.call(entry, "data")) return entry.data;
-	if (entry.type === IMPLEMENT_LOOP_V2_STATE_TYPE && Object.prototype.hasOwnProperty.call(entry, "value")) return entry.value;
+	if (entry.type === IMPLEMENT_LOOP_STATE_TYPE && Object.prototype.hasOwnProperty.call(entry, "value")) return entry.value;
 	return undefined;
 }
 
-export function getImplementLoopV2State(ctx: any): ImplementPlanLoopV2State | undefined {
-	return ctx?.state?.implementPlanLoopV2;
+export function getImplementLoopState(ctx: any): ImplementPlanLoopState | undefined {
+	return ctx?.state?.implementPlanLoop;
 }
 
-function setImplementLoopV2State(ctx: any, state: ImplementPlanLoopV2State | undefined): void {
+function setImplementLoopState(ctx: any, state: ImplementPlanLoopState | undefined): void {
 	if (!ctx.state) ctx.state = {};
-	ctx.state.implementPlanLoopV2 = state;
+	ctx.state.implementPlanLoop = state;
 }
 
-export function loadPersistedImplementLoopV2State(ctx: any): ImplementPlanLoopV2State | undefined {
+export function loadPersistedImplementLoopState(ctx: any): ImplementPlanLoopState | undefined {
 	const entries = ctx?.sessionManager?.getEntries?.() ?? [];
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (!(entry?.type === "custom" && entry?.customType === IMPLEMENT_LOOP_V2_STATE_TYPE) && entry?.type !== IMPLEMENT_LOOP_V2_STATE_TYPE) continue;
+		if (!(entry?.type === "custom" && entry?.customType === IMPLEMENT_LOOP_STATE_TYPE) && entry?.type !== IMPLEMENT_LOOP_STATE_TYPE) continue;
 		const data = getCustomEntryData(entry);
 		if (!data) return undefined;
 		if (data.active === false && !data.status) return undefined;
-		setImplementLoopV2State(ctx, data as ImplementPlanLoopV2State);
-		return data as ImplementPlanLoopV2State;
+		setImplementLoopState(ctx, data as ImplementPlanLoopState);
+		return data as ImplementPlanLoopState;
 	}
 	return undefined;
 }
 
-export async function applyImplementLoopV2State(ctx: any, state: ImplementPlanLoopV2State): Promise<ImplementPlanLoopV2State> {
-	setImplementLoopV2State(ctx, state);
-	appendCustomEntry(ctx.pi ?? ctx, IMPLEMENT_LOOP_V2_STATE_TYPE, state);
+export async function applyImplementLoopState(ctx: any, state: ImplementPlanLoopState): Promise<ImplementPlanLoopState> {
+	setImplementLoopState(ctx, state);
+	appendCustomEntry(ctx.pi ?? ctx, IMPLEMENT_LOOP_STATE_TYPE, state);
 	return state;
 }
 
-export async function clearImplementLoopV2State(ctx: any): Promise<void> {
-	setImplementLoopV2State(ctx, undefined);
-	appendCustomEntry(ctx.pi ?? ctx, IMPLEMENT_LOOP_V2_STATE_TYPE, { active: false });
+export async function clearImplementLoopState(ctx: any): Promise<void> {
+	setImplementLoopState(ctx, undefined);
+	appendCustomEntry(ctx.pi ?? ctx, IMPLEMENT_LOOP_STATE_TYPE, { active: false });
 }

@@ -1,0 +1,253 @@
+diff --git a/README.md b/README.md
+index 46a9d76..34a7e98 100644
+--- a/README.md
++++ b/README.md
+@@ -19,12 +19,12 @@ Notable behavior:
+ 
+-### `extensions/plan-feature.ts`
+-Interactive feature-planning workflow inside pi.
++### `extensions/plan.ts`
++Interactive planning workflow inside pi. Produces a structured raw plan and extracts an execution contract.
+ 
+ Commands:
+-- `/plan <feature brief or plan path>` — start planning mode, collect repo context, and begin an isolated planning session.
++- `/plan <feature brief>` — start a planning session, collect repo context, and begin producing a raw plan artifact.
++- `/plan-save [path]` — save the current plan markdown and extract an execution contract.
++- `/plan-answer` — provide answers to open planning questions (supports TUI and inline input).
+ - `/plan-status` — show the current planning session status.
+-- `/plan-done` — ask the planner to finalize the current draft.
+-- `/plan-save [path]` — save the current plan markdown.
+-- `/plan-tests` — show the next `/tdd-plan` command for the saved plan.
+-- `/end-planning` — return from planning mode to the original session position.
++- `/plan-next` — show the saved execution contract path for the next implementation step.
++- `/end-planning` — end the active planning session.
+ 
+@@ -34,12 +34,34 @@ Notable behavior:
+ - Supports interactive clarification questions in the TUI.
+-- Saves plans under `.pi/plans/` by default.
++- Saves plans under `.pi/plans/` and execution contracts as `.plan.contract.json` siblings.
+ 
+-### `extensions/tdd-plan.ts`
+-Generate TypeScript test files from a markdown plan, using repo-aware AI generation and an assessment loop.
++### `extensions/planning/`
++Shared modules for the planning workflow:
++- `contract-extractor.ts` — AI-powered extraction of execution contracts from raw plan artifacts.
++- `contract-render.ts` — renders execution contracts back to markdown.
++- `contract-schema.ts` — TypeScript types for the execution contract format.
++- `contract-validator.ts` — normalizes and validates execution contracts.
++- `question-loop.ts` — extracts, merges, and formats open planning questions.
++- `question-ui.ts` — TUI component for answering planning questions interactively.
++- `raw-artifact.ts` — utilities for building raw plan paths and rendering plan markdown.
+ 
+-Highlights:
+-- Reads markdown plans and extracts behavioral requirements.
+-- Detects local test conventions to choose better output paths and naming.
+-- Runs a generator + assessor loop to improve produced tests.
+-- Stores iteration artifacts under `.pi/generated-tdd/`.
++### `extensions/implement-plan-loop.ts`
++Automated implementation/review loop driven by a ready execution contract.
++
++Commands:
++- `/implement-plan-loop <plan.contract.json>` — start an implementation loop against a ready execution contract.
++- `/implement-plan-loop-status` — show the current loop status (iteration, review summary, triage decisions).
++- `/end-implement-plan-loop` — end the current implementation loop session.
++
++Notable behavior:
++- Runs an implement → review → triage state machine with up to 8 iterations.
++- Uses a separate model call for contract-aware implementation review.
++- Triages blocking findings into implementation repairs, evidence gathering, or external validation handoffs.
++- Stores iteration artifacts (summaries, reviews, diffs, triage decisions) under `.pi/generated-implementation/`.
++
++### `extensions/implement/`
++Shared modules for the implementation loop:
++- `contract-input.ts` — loads and validates execution contracts for the implementation loop.
++- `loop-artifacts.ts` — builds artifact paths for each iteration.
++- `loop-state.ts` — state management (persist, load, clear) for the implementation loop.
++- `prompts.ts` — prompt builders for implementation, review, fix handoff, and evidence bundles.
+ 
+@@ -65,5 +87,6 @@ For local development, either:
+ - `extensions/worktree.ts` — managed worktree lifecycle commands
+-- `extensions/plan-feature.ts` — interactive planning workflow
+-- `extensions/tdd-plan.ts` — markdown-plan-to-tests generation
+-- `docs/plan-feature-spec.md` — planning workflow notes/spec
++- `extensions/plan.ts` — interactive planning workflow
++- `extensions/planning/` — shared planning modules (contract extraction, validation, question loop, TUI)
++- `extensions/implement-plan-loop.ts` — automated implementation/review loop
++- `extensions/implement/` — shared implementation loop modules (contract input, artifacts, state, prompts)
+ 
+diff --git a/__tests__/extensions/currently-while-during-planning-there-is-a-active-planning-w.plan.test.ts b/__tests__/extensions/currently-while-during-planning-there-is-a-active-planning-w.plan.test.ts
+deleted file mode 100644
+index 1e4c574..0000000
+--- a/__tests__/extensions/currently-while-during-planning-there-is-a-active-planning-w.plan.test.ts
++++ /dev/null
+@@ -1,224 +0,0 @@
+-// Generated from a markdown plan.
+-// Plan: Make the "active planning" warning more visible with yellow/red colors and borders.
+-//
+-// CRITICAL AMBIGUITY NOTE:
+-// The plan does not specify which module renders the active-planning warning,
+-// what function/API to test, or how the warning integrates into CLI output.
+-// The plan's own edge cases acknowledge:
+-//   "No obvious existing module is found for the request."
+-//   "Critical behavior remains ambiguous and needs clarification before implementation."
+-//
+-// The plan's only concrete scope item is:
+-//   "Review and update __tests__/extensions/currently-it-is-not-possible-for-me-to-work-easily-on-the-sa.plan.test.ts"
+-//
+-// Per the existing test file (Example 1), the relevant modules are:
+-//   - extensions/worktree.ts (imported as worktreeExtension)
+-//   - extensions/plan-feature.ts (exports __testables with getPlanningState, applyPlanningState, clearPlanningState)
+-//
+-// The tests below are grounded in the REAL exports from plan-feature.ts __testables.
+-// The feature requires that when a planning session is active, the CLI warning
+-// uses ANSI color codes (yellow/red) and/or border characters for visibility.
+-// Since plan-feature.ts manages planning state, the rendering enhancement most
+-// likely lives there or in a new export from that module.
+-//
+-// Tests use node:test + node:assert/strict to match repo conventions.
+-
+-import test from "node:test";
+-import assert from "node:assert/strict";
+-
+-import { __testables } from "../../extensions/plan-feature.ts";
+-
+-// ---------------------------------------------------------------------------
+-// Baseline: existing plan-feature API must still work (out-of-scope guard)
+-// ---------------------------------------------------------------------------
+-
+-test("out of scope guard: existing getPlanningState, applyPlanningState, clearPlanningState APIs are preserved", () => {
+-	assert.equal(
+-		typeof __testables.getPlanningState,
+-		"function",
+-		"getPlanningState must still be exported from __testables",
+-	);
+-	assert.equal(
+-		typeof __testables.applyPlanningState,
+-		"function",
+-		"applyPlanningState must still be exported from __testables",
+-	);
+-	assert.equal(
+-		typeof __testables.clearPlanningState,
+-		"function",
+-		"clearPlanningState must still be exported from __testables",
+-	);
+-});
+-
+-// ---------------------------------------------------------------------------
+-// Feature requirement: plan-feature must export a formatPlanningWarning (or
+-// similar) function that renders the active-planning banner with color/borders.
+-// ---------------------------------------------------------------------------
+-
+-test("plan-feature __testables exports a function for formatting the active-planning warning", () => {
+-	// The implementation must expose a formatting function for the planning warning.
+-	// We accept any of these reasonable names:
+-	const candidateNames = [
+-		"formatPlanningWarning",
+-		"formatPlanningBanner",
+-		"renderPlanningWarning",
+-		"getPlanningWarningText",
+-		"planningWarning",
+-		"formatActivePlanningWarning",
+-	];
+-
+-	const testables = __testables as Record<string, unknown>;
+-	const found = candidateNames.find((name) => typeof testables[name] === "function");
+-
+-	assert.ok(
+-		found,
+-		`plan-feature.__testables must export a planning-warning formatting function. ` +
+-			`Checked: ${candidateNames.join(", ")}. ` +
+-			`Available keys: ${Object.keys(testables).join(", ")}`,
+-	);
+-});
+-
+-// Helper to locate the formatting function dynamically
+-function getWarningFormatter(): (state: Record<string, unknown>) => string {
+-	const candidateNames = [
+-		"formatPlanningWarning",
+-		"formatPlanningBanner",
+-		"renderPlanningWarning",
+-		"getPlanningWarningText",
+-		"planningWarning",
+-		"formatActivePlanningWarning",
+-	];
+-
+-	const testables = __testables as Record<string, unknown>;
+-	const name = candidateNames.find((n) => typeof testables[n] === "function");
+-
+-	if (!name) {
+-		throw new Error(
+-			`No planning-warning formatting function found in plan-feature.__testables. ` +
+-				`Checked: ${candidateNames.join(", ")}. ` +
+-				`Available: ${Object.keys(testables).join(", ")}`,
+-		);
+-	}
+-
+-	return testables[name] as (state: Record<string, unknown>) => string;
+-}
+-
+-// ---------------------------------------------------------------------------
+-// Requirement: warning uses yellow or red ANSI color codes for visibility
+-// ---------------------------------------------------------------------------
+-
+-test("active planning warning uses yellow or red ANSI color codes for visibility", () => {
+-	const format = getWarningFormatter();
+-	const output = format({ active: true, title: "Test Plan" });
+-
+-	// Standard ANSI codes for yellow (33, 93) and red (31, 91), plus 256-color variants
+-	const hasYellow = /\x1b\[33m|\x1b\[93m|\x1b\[38;5;(?:3|11|226|220)m/.test(output);
+-	const hasRed = /\x1b\[31m|\x1b\[91m|\x1b\[38;5;(?:1|9|196)m/.test(output);
+-
+-	assert.ok(
+-		hasYellow || hasRed,
+-		`Active planning warning must use yellow or red ANSI codes. Got:\n${JSON.stringify(output)}`,
+-	);
+-});
+-
+-// ---------------------------------------------------------------------------
+-// Requirement: warning is enclosed within visible borders
+-// ---------------------------------------------------------------------------
+-
+-test("active planning warning is enclosed within visible borders (box-drawing or repeated line characters)", () => {
+-	const format = getWarningFormatter();
+-	const output = format({ active: true, title: "Test Plan" });
+-
+-	const hasBoxDrawing = /[─━╔╗╚╝║┌┐└┘┃╭╮╰╯]/.test(output);
+-	const hasRepeatedDashes = /[-=]{3,}/.test(output);
+-	const hasBlockChars = /[█▀▄▌▐]/.test(output);
+-
+-	assert.ok(
+-		hasBoxDrawing || hasRepeatedDashes || hasBlockChars,
+-		`Active planning warning must be enclosed in visible borders. Got:\n${JSON.stringify(output)}`,
+-	);
+-});
+-
+-// ---------------------------------------------------------------------------
+-// Requirement: warning includes recognizable label
+-// ---------------------------------------------------------------------------
+-
+-test("active planning warning includes a recognisable label like 'active planning' or 'planning session'", () => {
+-	const format = getWarningFormatter();
+-	const output = format({ active: true, title: "Some Plan" });
+-
+-	// Strip ANSI codes for text matching
+-	const plain = output.replace(/\x1b\[[0-9;]*m/g, "").toLowerCase();
+-
+-	const hasLabel =
+-		plain.includes("active planning") ||
+-		plain.includes("planning session") ||
+-		plain.includes("planning active") ||
+-		plain.includes("planning mode") ||
+-		plain.includes("⚠") ||
+-		plain.includes("warning");
+-
+-	assert.ok(hasLabel, `Banner must contain a recognisable planning-active label. Plain text:\n${plain}`);
+-});
+-
+-// ---------------------------------------------------------------------------
+-// Requirement: warning includes the planning session title
+-// ---------------------------------------------------------------------------
+-
+-test("active planning warning includes the planning session title for user context", () => {
+-	const format =
+... [truncated]

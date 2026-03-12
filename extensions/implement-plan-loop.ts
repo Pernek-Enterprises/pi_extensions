@@ -2,18 +2,18 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { complete, type Api, type Model, type UserMessage } from "./lib/pi-ai-compat.ts";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { ExecutionContract } from "./planning-v2/contract-schema.ts";
-import { loadReadyImplementationContract } from "./implement-v2/contract-input.ts";
-import { buildImplementationLoopArtifactPaths, slugFromContractPath } from "./implement-v2/loop-artifacts.ts";
+import type { ExecutionContract } from "./planning/contract-schema.ts";
+import { loadReadyImplementationContract } from "./implement/contract-input.ts";
+import { buildImplementationLoopArtifactPaths, slugFromContractPath } from "./implement/loop-artifacts.ts";
 import {
-	applyImplementLoopV2State,
-	clearImplementLoopV2State,
-	getImplementLoopV2State,
-	loadPersistedImplementLoopV2State,
-	type ImplementPlanLoopV2Iteration,
-	type ImplementPlanLoopV2NextState,
-	type ImplementPlanLoopV2State,
-} from "./implement-v2/loop-state.ts";
+	applyImplementLoopState,
+	clearImplementLoopState,
+	getImplementLoopState,
+	loadPersistedImplementLoopState,
+	type ImplementPlanLoopIteration,
+	type ImplementPlanLoopNextState,
+	type ImplementPlanLoopState,
+} from "./implement/loop-state.ts";
 import {
 	buildImplementationPrompt,
 	buildReviewSystemPrompt,
@@ -24,9 +24,9 @@ import {
 	type ImplementationReviewFinding,
 	type ImplementationReviewResult,
 	type ReviewResolutionType,
-} from "./implement-v2/prompts.ts";
+} from "./implement/prompts.ts";
 
-const IMPLEMENT_LOOP_V2_MAX_ITERATIONS = 8;
+const IMPLEMENT_LOOP_MAX_ITERATIONS = 8;
 const IMPLEMENT_LOOP_START_TIMEOUT_MS = 15000;
 const IMPLEMENT_LOOP_START_POLL_MS = 250;
 const MAX_CHANGED_FILE_PREVIEW_CHARS = 2200;
@@ -54,7 +54,7 @@ type EvidenceBundle = {
 };
 
 type TriageDecision = {
-	nextState: ImplementPlanLoopV2NextState;
+	nextState: ImplementPlanLoopNextState;
 	reason: string;
 	blockerSignatures: string[];
 	implementationBlockingCount: number;
@@ -356,7 +356,7 @@ function blockerSignature(finding: ImplementationReviewFinding): string {
 
 function buildTriageDecision(
 	review: ImplementationReviewResult,
-	previousIteration: ImplementPlanLoopV2Iteration | undefined,
+	previousIteration: ImplementPlanLoopIteration | undefined,
 	currentMode: LoopActionState,
 ): TriageDecision {
 	const blockers = review.findings.filter((finding) => finding.disposition === "blocking");
@@ -509,7 +509,7 @@ function renderExternalValidationHandoff(contract: ExecutionContract, review: Im
 		(finding) => finding.disposition === "blocking" && finding.resolutionType === "external-validation",
 	);
 	return [
-		`# Implement loop v2 external validation handoff`,
+		`# Implement loop external validation handoff`,
 		"",
 		`Goal: ${contract.goal}`,
 		`Summary: ${review.summary}`,
@@ -526,9 +526,9 @@ function renderExternalValidationHandoff(contract: ExecutionContract, review: Im
 	].join("\n").trim() + "\n";
 }
 
-function buildStatusBody(state: ImplementPlanLoopV2State): string {
+function buildStatusBody(state: ImplementPlanLoopState): string {
 	return [
-		`# Implement loop v2 status`,
+		`# Implement loop status`,
 		"",
 		`- contract path: ${state.contractPath}`,
 		`- status: ${state.status}`,
@@ -547,15 +547,15 @@ function buildStatusBody(state: ImplementPlanLoopV2State): string {
 }
 
 export const __testables = {
-	IMPLEMENT_LOOP_V2_MAX_ITERATIONS,
+	IMPLEMENT_LOOP_MAX_ITERATIONS: IMPLEMENT_LOOP_MAX_ITERATIONS,
 	slugFromContractPath,
 	buildImplementationLoopArtifactPaths,
 	buildStatusBody,
 	buildEvidenceFocusTerms,
-	getImplementLoopV2State,
-	loadPersistedImplementLoopV2State,
-	applyImplementLoopV2State,
-	clearImplementLoopV2State,
+	getImplementLoopState,
+	loadPersistedImplementLoopState,
+	applyImplementLoopState,
+	clearImplementLoopState,
 	extractImplementationSummary,
 	parseChangedFilesFromPorcelain,
 	normalizeReview,
@@ -563,23 +563,23 @@ export const __testables = {
 	renderEvidenceBundle,
 };
 
-export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
+export default function implementPlanLoopExtension(pi: ExtensionAPI) {
 	pi.on?.("session_start", async (_event, ctx) => {
-		loadPersistedImplementLoopV2State(ctx);
+		loadPersistedImplementLoopState(ctx);
 	});
 	pi.on?.("session_switch", async (_event, ctx) => {
-		loadPersistedImplementLoopV2State(ctx);
+		loadPersistedImplementLoopState(ctx);
 	});
 	pi.on?.("session_tree", async (_event, ctx) => {
-		loadPersistedImplementLoopV2State(ctx);
+		loadPersistedImplementLoopState(ctx);
 	});
 
-	pi.registerCommand("implement-plan-loop-v2", {
+	pi.registerCommand("implement-plan-loop", {
 		description: "Implement a ready execution contract using an implementation/review state machine",
 		handler: async (args, ctx) => {
-			const existing = getImplementLoopV2State(ctx) ?? loadPersistedImplementLoopV2State(ctx);
+			const existing = getImplementLoopState(ctx) ?? loadPersistedImplementLoopState(ctx);
 			if (existing?.active) {
-				notify(ctx, "implement-plan-loop-v2 is already running. Use /end-implement-plan-loop-v2 first.", "warning");
+				notify(ctx, "implement-plan-loop is already running. Use /end-implement-plan-loop first.", "warning");
 				return;
 			}
 
@@ -587,37 +587,37 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 			if (!contractInput && ctx.hasUI && typeof ctx.ui.input === "function") {
 				const input = await ctx.ui.input("Execution contract path", ".pi/plans/feature.plan.contract.json");
 				if (!input?.trim()) {
-					notify(ctx, "implement-plan-loop-v2 cancelled", "info");
+					notify(ctx, "implement-plan-loop cancelled", "info");
 					return;
 				}
 				contractInput = input.trim();
 			}
 			if (!contractInput) {
-				notify(ctx, "Usage: /implement-plan-loop-v2 <plan.contract.json>", "warning");
+				notify(ctx, "Usage: /implement-plan-loop <plan.contract.json>", "warning");
 				return;
 			}
 
-			let state: ImplementPlanLoopV2State = {
+			let state: ImplementPlanLoopState = {
 				active: true,
 				repoRoot: ctx.cwd ?? process.cwd(),
 				contractPath: contractInput,
 				slug: slugFromContractPath(contractInput),
 				status: "preflight",
 				iteration: 0,
-				maxIterations: IMPLEMENT_LOOP_V2_MAX_ITERATIONS,
+				maxIterations: IMPLEMENT_LOOP_MAX_ITERATIONS,
 				startedAt: new Date().toISOString(),
 				updatedAt: new Date().toISOString(),
 				changedFiles: [],
 				iterations: [],
 				lastTransitionReason: "Validating contract, repository, and model before starting the implementation loop.",
 			};
-			await applyImplementLoopV2State({ ...ctx, pi }, state);
+			await applyImplementLoopState({ ...ctx, pi }, state);
 
 			let loaded: Awaited<ReturnType<typeof loadReadyImplementationContract>>;
 			try {
 				loaded = await loadReadyImplementationContract(ctx.cwd ?? process.cwd(), contractInput);
 			} catch (error) {
-				await applyImplementLoopV2State({ ...ctx, pi }, {
+				await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
 					active: false,
 					status: "failed",
@@ -633,7 +633,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 			try {
 				apiKey = await assertModelReady(ctx);
 			} catch (error) {
-				await applyImplementLoopV2State({ ...ctx, pi }, {
+				await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
 					active: false,
 					status: "failed",
@@ -646,7 +646,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 			}
 
 			let repoContext = await collectRepoContext(loaded.repoRoot, loaded.contract);
-			state = await applyImplementLoopV2State({ ...ctx, pi }, {
+			state = await applyImplementLoopState({ ...ctx, pi }, {
 				...state,
 				repoRoot: loaded.repoRoot,
 				contractPath: loaded.relativePath,
@@ -655,7 +655,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 				updatedAt: new Date().toISOString(),
 				lastTransitionReason: "Preflight passed. Starting the initial implementation pass.",
 			});
-			notify(ctx, `Starting implement-plan-loop-v2 for ${loaded.relativePath}`, "info");
+			notify(ctx, `Starting implement-plan-loop for ${loaded.relativePath}`, "info");
 
 			let nextAction: LoopActionState = "implementing";
 			let previousImplementationHandoff: string | undefined;
@@ -664,10 +664,10 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 			let previousReview: ImplementationReviewResult | undefined;
 			let previousDiffPreview = "";
 
-			for (let iteration = 1; iteration <= IMPLEMENT_LOOP_V2_MAX_ITERATIONS; iteration++) {
+			for (let iteration = 1; iteration <= IMPLEMENT_LOOP_MAX_ITERATIONS; iteration++) {
 				const artifactPaths = buildImplementationLoopArtifactPaths(loaded.repoRoot, loaded.relativePath, iteration);
 				await fs.mkdir(artifactPaths.directory, { recursive: true });
-				state = await applyImplementLoopV2State({ ...ctx, pi }, {
+				state = await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
 					status: nextAction,
 					iteration,
@@ -702,7 +702,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					changedFilePreviews = evidenceBundle.targetFiles.map((item) => ({ path: item.path, preview: item.preview }));
 					diffPreview = previousDiffPreview || (await collectDiffPreview(pi, loaded.repoRoot));
 					implementationSummary = previousReviewSummary ?? state.lastImplementationSummary ?? "Evidence re-review with focused repository snippets.";
-					state = await applyImplementLoopV2State({ ...ctx, pi }, {
+					state = await applyImplementLoopState({ ...ctx, pi }, {
 						...state,
 						lastEvidenceSummary: evidenceBundle.summary,
 						updatedAt: new Date().toISOString(),
@@ -717,11 +717,11 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					});
 					const baselineAssistantId = getLastAssistantSnapshot(ctx)?.id;
 					if (typeof pi.sendUserMessage === "function") pi.sendUserMessage(prompt);
-					else if (typeof pi.sendMessage === "function") pi.sendMessage({ customType: "implement-plan-loop-v2", content: prompt, display: true }, { triggerTurn: true });
+					else if (typeof pi.sendMessage === "function") pi.sendMessage({ customType: "implement-plan-loop", content: prompt, display: true }, { triggerTurn: true });
 					else throw new Error("No messaging API available to start implementation pass");
 					const started = await waitForLoopTurnToStart(ctx, baselineAssistantId);
 					if (!started) {
-						await applyImplementLoopV2State({ ...ctx, pi }, {
+						await applyImplementLoopState({ ...ctx, pi }, {
 							...state,
 							active: false,
 							status: "failed",
@@ -735,7 +735,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					await ctx.waitForIdle();
 					const snapshot = getLastAssistantSnapshot(ctx);
 					if (!snapshot || snapshot.id === baselineAssistantId) {
-						await applyImplementLoopV2State({ ...ctx, pi }, {
+						await applyImplementLoopState({ ...ctx, pi }, {
 							...state,
 							active: false,
 							status: "failed",
@@ -752,7 +752,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 							: snapshot.stopReason === "error"
 								? "implementation-error"
 								: "implementation-length-truncated";
-						await applyImplementLoopV2State({ ...ctx, pi }, {
+						await applyImplementLoopState({ ...ctx, pi }, {
 							...state,
 							active: false,
 							status: "failed",
@@ -778,7 +778,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					await fs.writeFile(artifactPaths.diffPath, diffPreview.endsWith("\n") ? diffPreview : diffPreview + (diffPreview ? "\n" : ""), "utf8");
 				}
 
-				state = await applyImplementLoopV2State({ ...ctx, pi }, {
+				state = await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
 					status: "reviewing",
 					updatedAt: new Date().toISOString(),
@@ -789,7 +789,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 							? "Re-reviewing the current repository state with stronger targeted evidence."
 							: "Reviewing the latest repository state against the execution contract.",
 				});
-				notify(ctx, `implement-plan-loop-v2 round ${iteration}: reviewing implementation against the contract...`, "info");
+				notify(ctx, `implement-plan-loop round ${iteration}: reviewing implementation against the contract...`, "info");
 				const review = await reviewImplementation(ctx, apiKey, {
 					contract: loaded.contract,
 					repoContext,
@@ -809,7 +809,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 				const targetFiles = [...new Set(review.findings.flatMap((finding) => finding.targetFiles))];
 
 				if (blockingCount === 0) {
-					const iterationRecord: ImplementPlanLoopV2Iteration = {
+					const iterationRecord: ImplementPlanLoopIteration = {
 						iteration,
 						mode: nextAction,
 						implementationSummaryPath: nextAction === "gathering-evidence" ? undefined : path.relative(loaded.repoRoot, artifactPaths.implementationSummaryPath),
@@ -833,7 +833,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 						blockerSignatures: [],
 						triageDecision: "completed",
 					};
-					state = await applyImplementLoopV2State({ ...ctx, pi }, {
+					state = await applyImplementLoopState({ ...ctx, pi }, {
 						...state,
 						active: false,
 						status: "completed",
@@ -847,7 +847,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 						iterations: [...state.iterations, iterationRecord],
 					});
 					const finalSummary = [
-						`# implement-plan-loop-v2 final summary`,
+						`# implement-plan-loop final summary`,
 						"",
 						`Contract: ${loaded.relativePath}`,
 						`Summary: ${review.summary}`,
@@ -859,7 +859,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					return;
 				}
 
-				state = await applyImplementLoopV2State({ ...ctx, pi }, {
+				state = await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
 					status: "triaging-findings",
 					updatedAt: new Date().toISOString(),
@@ -878,7 +878,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					await fs.writeFile(artifactPaths.fixHandoffPath, fixHandoff, "utf8");
 				}
 
-				const iterationRecord: ImplementPlanLoopV2Iteration = {
+				const iterationRecord: ImplementPlanLoopIteration = {
 					iteration,
 					mode: nextAction,
 					implementationSummaryPath: nextAction === "gathering-evidence" ? undefined : path.relative(loaded.repoRoot, artifactPaths.implementationSummaryPath),
@@ -902,7 +902,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					blockerSignatures: triage.blockerSignatures,
 					triageDecision: triage.nextState,
 				};
-				state = await applyImplementLoopV2State({ ...ctx, pi }, {
+				state = await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
 					updatedAt: new Date().toISOString(),
 					lastTriageDecision: triage.nextState,
@@ -913,7 +913,7 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 				if (triage.nextState === "awaiting-external-validation") {
 					const handoff = renderExternalValidationHandoff(loaded.contract, review);
 					await fs.writeFile(artifactPaths.externalValidationPath, handoff, "utf8");
-					await applyImplementLoopV2State({ ...ctx, pi }, {
+					await applyImplementLoopState({ ...ctx, pi }, {
 						...state,
 						active: false,
 						status: "awaiting-external-validation",
@@ -921,20 +921,20 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 						stopReason: "manual-validation-required",
 						lastTransitionReason: triage.reason,
 					});
-					notify(ctx, `implement-plan-loop-v2 is awaiting external validation: ${triage.reason}`, "warning");
+					notify(ctx, `implement-plan-loop is awaiting external validation: ${triage.reason}`, "warning");
 					return;
 				}
 
-				if (iteration === IMPLEMENT_LOOP_V2_MAX_ITERATIONS || triage.nextState === "failed") {
-					await applyImplementLoopV2State({ ...ctx, pi }, {
+				if (iteration === IMPLEMENT_LOOP_MAX_ITERATIONS || triage.nextState === "failed") {
+					await applyImplementLoopState({ ...ctx, pi }, {
 						...state,
 						active: false,
 						status: "failed",
 						updatedAt: new Date().toISOString(),
-						stopReason: iteration === IMPLEMENT_LOOP_V2_MAX_ITERATIONS ? "safety-cap-unresolved" : "triage-failed",
+						stopReason: iteration === IMPLEMENT_LOOP_MAX_ITERATIONS ? "safety-cap-unresolved" : "triage-failed",
 						lastTransitionReason: triage.reason,
 					});
-					notify(ctx, `implement-plan-loop-v2 stopped: ${triage.reason}`, "warning");
+					notify(ctx, `implement-plan-loop stopped: ${triage.reason}`, "warning");
 					return;
 				}
 
@@ -957,27 +957,27 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("implement-plan-loop-v2-status", {
-		description: "Show current implement-plan-loop-v2 status",
+	pi.registerCommand("implement-plan-loop-status", {
+		description: "Show current implement-plan-loop status",
 		handler: async (_args, ctx) => {
-			const state = getImplementLoopV2State(ctx) ?? loadPersistedImplementLoopV2State(ctx);
+			const state = getImplementLoopState(ctx) ?? loadPersistedImplementLoopState(ctx);
 			if (!state?.active && state?.status !== "completed" && state?.status !== "failed" && state?.status !== "awaiting-external-validation" && state?.status !== "cancelled") {
-				notify(ctx, "No active implement-plan-loop-v2 session.", "warning");
+				notify(ctx, "No active implement-plan-loop session.", "warning");
 				return;
 			}
 			if (typeof pi.sendMessage === "function") {
-				pi.sendMessage({ customType: "implement-plan-loop-v2-status", content: buildStatusBody(state!), display: true }, { triggerTurn: false });
+				pi.sendMessage({ customType: "implement-plan-loop-status", content: buildStatusBody(state!), display: true }, { triggerTurn: false });
 			}
-			notify(ctx, "Implementation loop v2 status shown.", "info");
+			notify(ctx, "Implementation loop status shown.", "info");
 		},
 	});
 
-	pi.registerCommand("end-implement-plan-loop-v2", {
-		description: "End the current implement-plan-loop-v2 session state",
+	pi.registerCommand("end-implement-plan-loop", {
+		description: "End the current implement-plan-loop session state",
 		handler: async (_args, ctx) => {
-			const state = getImplementLoopV2State(ctx) ?? loadPersistedImplementLoopV2State(ctx);
+			const state = getImplementLoopState(ctx) ?? loadPersistedImplementLoopState(ctx);
 			if (state) {
-				await applyImplementLoopV2State({ ...ctx, pi }, {
+				await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
 					active: false,
 					status: "cancelled",
@@ -986,9 +986,9 @@ export default function implementPlanLoopV2Extension(pi: ExtensionAPI) {
 					lastTransitionReason: "Loop ended explicitly by the user.",
 				});
 			} else {
-				await clearImplementLoopV2State({ ...ctx, pi });
+				await clearImplementLoopState({ ...ctx, pi });
 			}
-			notify(ctx, "implement-plan-loop-v2 ended.", "info");
+			notify(ctx, "implement-plan-loop ended.", "info");
 		},
 	});
 }

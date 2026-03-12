@@ -1,4 +1,4 @@
-import type { ExecutionContract } from "../planning-v2/contract-schema.ts";
+import type { ExecutionContract } from "../planning/contract-schema.ts";
 
 export type ReviewResolutionType = "implementation" | "evidence" | "external-validation";
 
@@ -205,7 +205,7 @@ export function renderFixHandoff(
 		(finding) => finding.disposition === "blocking" && (!options?.resolutionType || finding.resolutionType === options.resolutionType),
 	);
 	return [
-		`# Implement loop v2 fix handoff`,
+		`# Implement loop fix handoff`,
 		"",
 		`Goal: ${contract.goal}`,
 		`Summary: ${review.summary}`,

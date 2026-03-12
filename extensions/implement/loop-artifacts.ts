@@ -19,7 +19,7 @@ export function buildImplementationLoopArtifactPaths(repoRoot: string, contractR
 	finalSummaryPath: string;
 } {
 	const slug = slugFromContractPath(contractRelativePath);
-	const directory = path.join(repoRoot, ".pi", "generated-implementation-v2", slug);
+	const directory = path.join(repoRoot, ".pi", "generated-implementation", slug);
 	return {
 		directory,
 		implementationSummaryPath: path.join(directory, `iteration-${iteration}.implementation-summary.md`),
