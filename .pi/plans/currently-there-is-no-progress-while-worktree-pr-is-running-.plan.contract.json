@@ -1,0 +1,170 @@
+{
+  "artifactType": "execution-contract",
+  "version": 1,
+  "generatedAt": "2025-01-21T00:00:00.000Z",
+  "source": {
+    "rawArtifactPath": ".pi/plans/currently-there-is-no-progress-while-worktree-pr-is-running-.plan.md",
+    "rawArtifactKind": "markdown"
+  },
+  "goal": "Add a visual progress spinner to the worktree PR creation workflow so users see real-time phase updates instead of no feedback while the operation runs.",
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "text": "Create a ProgressLoader component in extensions/worktree.ts that animates through spinner frames ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ at 80ms intervals.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 1: ProgressLoader component"
+    },
+    {
+      "id": "REQ-2",
+      "text": "ProgressLoader must expose a setMessage(msg) method that updates the displayed text and triggers a re-render.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 1: ProgressLoader component"
+    },
+    {
+      "id": "REQ-3",
+      "text": "ProgressLoader must expose a handleInput(data) method that detects Esc (\\u001b) or Ctrl+C (\\x03) for cancellation.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 1: ProgressLoader component"
+    },
+    {
+      "id": "REQ-4",
+      "text": "ProgressLoader must expose a stop() method that clears the animation interval to prevent leaks.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 1: ProgressLoader component"
+    },
+    {
+      "id": "REQ-5",
+      "text": "ProgressLoader render(width) must return ['', '  <spinner> message'] format.",
+      "kind": "behavioral",
+      "priority": "secondary",
+      "source": "Section 1: ProgressLoader component"
+    },
+    {
+      "id": "REQ-6",
+      "text": "ProgressLoader must use only the minimal tui interface already declared in the file — no external dependencies.",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Section 1: ProgressLoader component"
+    },
+    {
+      "id": "REQ-7",
+      "text": "Extract the core PR logic from handleWorktreePr into a new runPrWorkflow(ctx, progress?) function that calls progress?.setMessage(...) at each phase transition: validate → 'Validating worktree…', diff → 'Analyzing changes…', commit → 'Generating commit…', push → 'Pushing <branch>…', pr → 'Creating pull request…'.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 2: Extracted runPrWorkflow"
+    },
+    {
+      "id": "REQ-8",
+      "text": "Existing info() calls in the PR workflow must be preserved for non-UI consumers.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 2: Extracted runPrWorkflow"
+    },
+    {
+      "id": "REQ-9",
+      "text": "New handleWorktreePr wrapper: when ctx.hasUI && ctx.ui?.custom is available, wrap the workflow in ctx.ui.custom(), create a ProgressLoader, and run the workflow async while the spinner is visible. Properly stop the spinner on both success and error paths.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 3: New handleWorktreePr wrapper"
+    },
+    {
+      "id": "REQ-10",
+      "text": "When Esc or Ctrl+C is pressed during the progress spinner, throw an error to halt the PR operation.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 3: New handleWorktreePr wrapper"
+    },
+    {
+      "id": "REQ-11",
+      "text": "Without UI (ctx.hasUI is false or ctx.ui?.custom unavailable), handleWorktreePr calls runPrWorkflow(ctx) directly — identical to previous behavior.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Section 3: New handleWorktreePr wrapper"
+    }
+  ],
+  "checks": [
+    {
+      "id": "CHK-1",
+      "text": "ProgressLoader cycles through all 10 spinner frames (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) at approximately 80ms intervals.",
+      "kind": "test",
+      "source": "REQ-1"
+    },
+    {
+      "id": "CHK-2",
+      "text": "Calling setMessage updates the text shown next to the spinner on the next render.",
+      "kind": "test",
+      "source": "REQ-2"
+    },
+    {
+      "id": "CHK-3",
+      "text": "Pressing Esc or Ctrl+C during spinner triggers cancellation (throws error to halt operation).",
+      "kind": "test",
+      "source": "REQ-3, REQ-10"
+    },
+    {
+      "id": "CHK-4",
+      "text": "Calling stop() clears the interval — no further frame updates occur after stop.",
+      "kind": "test",
+      "source": "REQ-4"
+    },
+    {
+      "id": "CHK-5",
+      "text": "runPrWorkflow calls progress.setMessage with the correct message string at each of the 5 phase transitions.",
+      "kind": "test",
+      "source": "REQ-7"
+    },
+    {
+      "id": "CHK-6",
+      "text": "When ctx.hasUI is true and ctx.ui.custom is available, handleWorktreePr renders the ProgressLoader spinner during the workflow.",
+      "kind": "verification",
+      "source": "REQ-9"
+    },
+    {
+      "id": "CHK-7",
+      "text": "The spinner is stopped on both successful completion and error paths (no interval leaks).",
+      "kind": "test",
+      "source": "REQ-4, REQ-9"
+    },
+    {
+      "id": "CHK-8",
+      "text": "When ctx.hasUI is false, handleWorktreePr runs the workflow without any spinner — behavior identical to pre-change.",
+      "kind": "test",
+      "source": "REQ-11"
+    },
+    {
+      "id": "CHK-9",
+      "text": "Existing info() logging calls remain in runPrWorkflow and are still invoked regardless of progress parameter presence.",
+      "kind": "verification",
+      "source": "REQ-8"
+    },
+    {
+      "id": "CHK-10",
+      "text": "No new external dependencies are added — ProgressLoader uses only the tui interface already in extensions/worktree.ts.",
+      "kind": "verification",
+      "source": "REQ-6"
+    }
+  ],
+  "ambiguities": [],
+  "evidence": [
+    {
+      "path": "extensions/worktree.ts",
+      "reason": "The single file being modified: contains ProgressLoader component, runPrWorkflow extraction, and handleWorktreePr wrapper."
+    }
+  ],
+  "outOfScope": [
+    "Changes to any files other than extensions/worktree.ts",
+    "Adding external dependencies",
+    "Modifying the tui interface definition",
+    "Progress indicators for other worktree operations beyond PR creation"
+  ],
+  "status": "ready",
+  "contractIssues": [],
+  "advisoryNotes": [
+    "The plan describes the implementation as already complete ('Here's a summary of what was done'), so this may be a post-hoc documentation artifact rather than a forward-looking plan.",
+    "Line numbers referenced in the plan (69–126, 848–925, 927–955) may shift if the file has been modified since the plan was written."
+  ]
+}

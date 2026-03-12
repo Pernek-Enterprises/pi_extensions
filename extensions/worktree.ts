@@ -67,6 +67,60 @@ type WorktreeMetadata = {
 	lastFailure?: WorktreeFailure;
 };
 
+type MinimalTui = { stop?: () => void; start?: () => void; requestRender?: (force?: boolean) => void };
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL_MS = 80;
+
+class ProgressLoader {
+	private tui: MinimalTui;
+	private message: string;
+	private frameIndex = 0;
+	private intervalId: ReturnType<typeof setInterval> | null = null;
+	private abortController = new AbortController();
+	onAbort?: () => void;
+
+	constructor(tui: MinimalTui, message: string) {
+		this.tui = tui;
+		this.message = message;
+		this.intervalId = setInterval(() => {
+			this.frameIndex = (this.frameIndex + 1) % SPINNER_FRAMES.length;
+			this.tui.requestRender?.();
+		}, SPINNER_INTERVAL_MS);
+	}
+
+	get signal(): AbortSignal {
+		return this.abortController.signal;
+	}
+
+	setMessage(message: string): void {
+		this.message = message;
+		this.tui.requestRender?.();
+	}
+
+	stop(): void {
+		if (this.intervalId) {
+			clearInterval(this.intervalId);
+			this.intervalId = null;
+		}
+	}
+
+	render(_width: number): string[] {
+		const frame = SPINNER_FRAMES[this.frameIndex];
+		return ["", `  ${frame} ${this.message}`];
+	}
+
+	handleInput(data: string): void {
+		if (data === "\u001b" || data === "\x03") {
+			this.abortController.abort();
+			this.stop();
+			this.onAbort?.();
+		}
+	}
+
+	invalidate(): void {}
+}
+
 function info(ctx: Ctx, message: string) {
 	ctx.ui?.notify?.(message, "info");
 	ctx.pi?.notify?.(message);
@@ -792,17 +846,19 @@ async function getGeneratedTexts(ctx: Ctx, metadata: WorktreeMetadata, branch: s
 	};
 }
 
-async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+async function runPrWorkflow(ctx: Ctx, progress?: ProgressLoader): Promise<WorktreeMetadata> {
 	const cwd = ctx.cwd;
 	let phase = "validate";
 	let metadata: WorktreeMetadata | undefined;
 	let branch = "";
 
 	try {
+		progress?.setMessage("Validating worktree…");
 		({ metadata, branch } = await detectManagedWorktreeFromCwd(ctx, cwd));
 		await ensureGhAuthenticated(ctx, cwd);
 
 		// Get full diff against main for comprehensive PR description
+		progress?.setMessage("Analyzing changes…");
 		const fullDiffResult = await runInCwd(ctx, cwd, "git diff main");
 		const fullDiff = trimOutput(fullDiffResult.stdout);
 
@@ -810,6 +866,7 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
 		const hasChanges = trimOutput(status.stdout).length > 0;
 
 		phase = "commit";
+		progress?.setMessage("Generating commit…");
 		const generatedTexts = await getGeneratedTexts(ctx, metadata, branch, fullDiff);
 
 		let commitStatus = "skipped-clean";
@@ -821,11 +878,13 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
 		}
 
 		phase = "push";
+		progress?.setMessage(`Pushing ${branch}…`);
 		info(ctx, `Pushing ${branch}...`);
 		await runInCwd(ctx, cwd, `git push -u origin ${branch}`);
 		const pushStatus = "pushed";
 
 		phase = "pr";
+		progress?.setMessage("Creating pull request…");
 		info(ctx, `Preparing PR for ${branch}...`);
 		const existingPrUrl = await lookupExistingPr(ctx, cwd, branch);
 		const prUrl = existingPrUrl
@@ -863,6 +922,40 @@ async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
 		await recordFailure(ctx, { command: "worktree-pr", phase, reason }, metadata, { cwd, branch: branch || undefined });
 		throw error;
 	}
+}
+
+async function handleWorktreePr(ctx: Ctx): Promise<WorktreeMetadata> {
+	if (ctx.hasUI && ctx.ui?.custom) {
+		return await ctx.ui.custom<WorktreeMetadata>((tui, _theme, _kb, done) => {
+			const progress = new ProgressLoader(tui, "Validating worktree…");
+			let resolved = false;
+			const safeDone = (value: WorktreeMetadata | Error) => {
+				if (resolved) return;
+				resolved = true;
+				done(value as unknown as WorktreeMetadata);
+			};
+
+			progress.onAbort = () => {
+				safeDone(new Error("Cancelled"));
+			};
+
+			runPrWorkflow(ctx, progress)
+				.then((result) => {
+					progress.stop();
+					safeDone(result);
+				})
+				.catch((err) => {
+					progress.stop();
+					safeDone(err instanceof Error ? err : new Error(String(err)));
+				});
+
+			return progress;
+		}).then((result) => {
+			if (result instanceof Error) throw result;
+			return result;
+		});
+	}
+	return await runPrWorkflow(ctx);
 }
 
 async function ensureSafeToCleanup(ctx: Ctx, cwd: string): Promise<void> {
