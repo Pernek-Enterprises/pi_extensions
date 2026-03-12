@@ -1,0 +1,136 @@
+diff --git a/__tests__/extensions/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.ts b/__tests__/extensions/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.ts
+index 285eeb4..3bcac34 100644
+--- a/__tests__/extensions/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.ts
++++ b/__tests__/extensions/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.ts
+@@ -41,22 +41,40 @@ type CommandHandler = (ctx: Ctx, ...args: string[]) => Promise<unknown> | unknow
+  * Extract the --body value from a `gh pr create` command.
+- * The actual implementation uses JSON.stringify (shQuote) for quoting,
+- * so the body appears as --body "..." with JSON-escaped content.
++ * The implementation uses POSIX single-quote escaping (shQuote),
++ * so the body appears as --body '...' with embedded single quotes escaped as '\''
+  */
+ function extractPrBody(command: string): string {
+-	// Match --body followed by a JSON-quoted string (shQuote = JSON.stringify)
+-	const jsonQuoteMatch = command.match(/--body\s+"((?:[^"\\]|\\.)*)"/s);
+-	if (jsonQuoteMatch) {
+-		// Unescape JSON string escapes
+-		try {
+-			return JSON.parse(`"${jsonQuoteMatch[1]}"`);
+-		} catch {
+-			return jsonQuoteMatch[1];
+-		}
++	// Match --body followed by a POSIX single-quoted string
++	// POSIX single-quoting: '...' with embedded single quotes as '\''
++	const bodyIdx = command.indexOf("--body ");
++	if (bodyIdx === -1) return "";
++
++	const afterBody = command.substring(bodyIdx + 7).trimStart();
++	if (afterBody[0] !== "'") {
++		// Fallback: unquoted value until next flag or end
++		const unquotedMatch = afterBody.match(/^(\S+)/);
++		return unquotedMatch ? unquotedMatch[1] : "";
+ 	}
+ 
+-	// Fallback: --body '...'
+-	const singleQuoteMatch = command.match(/--body\s+'([^']*)'/s);
+-	if (singleQuoteMatch) return singleQuoteMatch[1];
+-
+-	return "";
++	// Parse POSIX single-quoted string: collect segments between single quotes,
++	// handling '\'' (end quote, escaped quote, start quote) as embedded single quotes
++	let result = "";
++	let i = 1; // skip opening quote
++	while (i < afterBody.length) {
++		const closeIdx = afterBody.indexOf("'", i);
++		if (closeIdx === -1) {
++			// Unterminated quote, take rest
++			result += afterBody.substring(i);
++			break;
++		}
++		result += afterBody.substring(i, closeIdx);
++		// Check if this is '\'' (escaped single quote)
++		if (afterBody.substring(closeIdx, closeIdx + 4) === "'\\''" ) {
++			result += "'";
++			i = closeIdx + 4;
++		} else {
++			// End of quoted string
++			break;
++		}
++	}
++	return result;
+ }
+@@ -200,3 +218,3 @@ function makePrCtx(opts: {
+ 
+-test("worktree extension exports commands including worktree-pr via both registerCommand and .commands", () => {
++test("worktree extension exports commands including worktree-pr via registerCommand", () => {
+ 	assert.ok(worktreeExtension, "worktree extension should be importable");
+@@ -208,7 +226,2 @@ test("worktree extension exports commands including worktree-pr via both registe
+ 	assert.ok(prCmd, "Expected worktree-pr registered via registerCommand");
+-
+-	// Verify .commands path
+-	const commands = (worktreeExtension as any).commands;
+-	assert.ok(commands, "Expected .commands property on export");
+-	assert.equal(typeof commands["worktree-pr"], "function", "Expected worktree-pr in .commands");
+ });
+diff --git a/__tests__/extensions/worktree-pr.test.ts b/__tests__/extensions/worktree-pr.test.ts
+index 2dd326b..cbe158b 100644
+--- a/__tests__/extensions/worktree-pr.test.ts
++++ b/__tests__/extensions/worktree-pr.test.ts
+@@ -39,18 +39,37 @@ type Ctx = {
+  * Helper to extract the --body content from a `gh pr create` command string.
+- * Handles both quoted (single/double) and unquoted body values.
++ * Handles POSIX single-quoted strings where embedded single quotes appear as '\''
+  */
+ function extractPrBody(command: string): string {
+-	// Try --body '...' or --body "..."
+-	const singleQuoteMatch = command.match(/--body\s+'([^']*(?:''[^']*)*)'/s);
+-	if (singleQuoteMatch) return singleQuoteMatch[1];
+-
+-	const doubleQuoteMatch = command.match(/--body\s+"([^"]*(?:""[^']*)*)"/s);
+-	if (doubleQuoteMatch) return doubleQuoteMatch[1];
++	const bodyIdx = command.indexOf("--body ");
++	if (bodyIdx === -1) return "";
++
++	const afterBody = command.substring(bodyIdx + 7).trimStart();
++	if (afterBody[0] === "'") {
++		// Parse POSIX single-quoted string with '\'' escaping
++		let result = "";
++		let i = 1; // skip opening quote
++		while (i < afterBody.length) {
++			const closeIdx = afterBody.indexOf("'", i);
++			if (closeIdx === -1) {
++				result += afterBody.substring(i);
++				break;
++			}
++			result += afterBody.substring(i, closeIdx);
++			if (afterBody.substring(closeIdx, closeIdx + 4) === "'\\''" ) {
++				result += "'";
++				i = closeIdx + 4;
++			} else {
++				break;
++			}
++		}
++		return result;
++	}
+ 
+-	// Try --body $'...' (bash ANSI-C quoting)
+-	const dollarQuoteMatch = command.match(/--body\s+\$'([^']*)'/s);
+-	if (dollarQuoteMatch) return dollarQuoteMatch[1];
++	if (afterBody[0] === '"') {
++		const doubleQuoteMatch = afterBody.match(/^"((?:[^"\\]|\\.)*)"/s);
++		if (doubleQuoteMatch) return doubleQuoteMatch[1];
++	}
+ 
+ 	// Fallback: unquoted value until next flag or end
+-	const unquotedMatch = command.match(/--body\s+(\S+)/s);
++	const unquotedMatch = afterBody.match(/^(\S+)/s);
+ 	if (unquotedMatch) return unquotedMatch[1];
+diff --git a/extensions/worktree.ts b/extensions/worktree.ts
+index a3ef872..8ff8d3e 100644
+--- a/extensions/worktree.ts
++++ b/extensions/worktree.ts
+@@ -695,3 +695,3 @@ async function ensureGhAuthenticated(ctx: Ctx, cwd: string): Promise<void> {
+ function shQuote(value: string): string {
+-	return JSON.stringify(value);
++	return `'${value.replace(/'/g, "'\\''")}'`;
+ }

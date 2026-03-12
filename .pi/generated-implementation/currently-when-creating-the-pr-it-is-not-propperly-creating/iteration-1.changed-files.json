@@ -1,0 +1,5 @@
+[
+  "__tests__/extensions/currently-when-creating-a-pr-with-worktree-pr-the-pr-descrip.plan.test.ts",
+  "__tests__/extensions/worktree-pr.test.ts",
+  "extensions/worktree.ts"
+]

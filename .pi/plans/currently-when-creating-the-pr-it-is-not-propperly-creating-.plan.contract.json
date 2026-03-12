@@ -1,0 +1,120 @@
+{
+  "artifactType": "execution-contract",
+  "version": 1,
+  "generatedAt": "2025-01-21T00:00:00Z",
+  "source": {
+    "rawArtifactPath": ".pi/plans/currently-when-creating-the-pr-it-is-not-propperly-creating-.plan.md",
+    "rawArtifactKind": "markdown"
+  },
+  "goal": "Fix PR description creation so that newlines are preserved correctly when passed to `gh pr create --body`, by replacing the broken `shQuote` implementation (which uses JSON.stringify and produces literal \\n) with POSIX single-quote escaping.",
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "text": "Replace the `shQuote` function in `extensions/worktree.ts` (around line 695-696) so it uses POSIX single-quote escaping (`'...'` with embedded single quotes escaped as `'\\''`) instead of `JSON.stringify()`. This ensures real newlines and special characters are preserved correctly in shell arguments.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Key Change #1"
+    },
+    {
+      "id": "REQ-2",
+      "text": "The new `shQuote` implementation should follow the same POSIX single-quoting pattern already used in `inline-git-commands.ts` in this repo.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Root Cause section — 'inline-git-commands.ts has the correct implementation using POSIX single-quoting'"
+    },
+    {
+      "id": "REQ-3",
+      "text": "Update the `extractPrBody` test(s) to handle single-quoted bodies instead of JSON-stringified bodies, and remove the broken `.commands` expectation.",
+      "kind": "behavioral",
+      "priority": "primary",
+      "source": "Key Change #2"
+    },
+    {
+      "id": "REQ-4",
+      "text": "All existing call sites of `shQuote` (17+ usages) must continue to work correctly with the new implementation — the fix must be a drop-in replacement.",
+      "kind": "operational",
+      "priority": "primary",
+      "source": "Key Change #1 — 'strictly more correct for all 17+ call sites'"
+    },
+    {
+      "id": "REQ-5",
+      "text": "(Optional) Improve the AI prompt structure in `getGeneratedTexts` in `extensions/worktree.ts` for better PR description quality.",
+      "kind": "behavioral",
+      "priority": "secondary",
+      "source": "Key Change #3"
+    }
+  ],
+  "checks": [
+    {
+      "id": "CHK-1",
+      "text": "Verify that `shQuote` applied to a string containing real newlines (e.g., `'line1\\nline2'`) produces a shell-safe quoted string that, when evaluated by bash, preserves the actual newline characters.",
+      "kind": "test",
+      "source": "Root Cause — JSON.stringify converts real newlines to literal \\n"
+    },
+    {
+      "id": "CHK-2",
+      "text": "Verify that `shQuote` correctly handles strings containing single quotes by escaping them as `'\\''`.",
+      "kind": "test",
+      "source": "REQ-1 — POSIX single-quote escaping"
+    },
+    {
+      "id": "CHK-3",
+      "text": "Verify that `shQuote` handles edge cases: empty strings, strings with only special characters, strings with backslashes, strings with double quotes.",
+      "kind": "test",
+      "source": "REQ-4 — drop-in replacement for all call sites"
+    },
+    {
+      "id": "CHK-4",
+      "text": "Verify that `extractPrBody` tests pass after being updated to expect single-quoted output format.",
+      "kind": "test",
+      "source": "REQ-3"
+    },
+    {
+      "id": "CHK-5",
+      "text": "Run the full test suite (`npm test` or equivalent) to confirm no regressions across all 17+ `shQuote` call sites.",
+      "kind": "verification",
+      "source": "REQ-4"
+    }
+  ],
+  "ambiguities": [
+    {
+      "id": "AMB-1",
+      "text": "Two overlapping test files exist for PR creation. The plan suggests the plan-generated one (`currently-when-...`) has better infrastructure but does not definitively resolve which should be canonical or whether both should be updated.",
+      "blocksExecution": false,
+      "source": "Open Questions #2"
+    },
+    {
+      "id": "AMB-2",
+      "text": "Should `--body-file` be used as a fallback mechanism if edge cases appear with the `shQuote` fix, or is the `shQuote` fix considered fully sufficient?",
+      "blocksExecution": false,
+      "source": "Open Questions #1"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "extensions/worktree.ts",
+      "reason": "Contains the broken `shQuote` function (line ~695) and `getGeneratedTexts` — the primary files to modify."
+    },
+    {
+      "path": "extensions/inline-git-commands.ts",
+      "reason": "Contains the correct POSIX single-quote escaping implementation to use as a reference pattern."
+    },
+    {
+      "path": "__tests__/",
+      "reason": "Contains test files including `extractPrBody` tests that need updating."
+    }
+  ],
+  "outOfScope": [
+    "Switching to `--body-file` approach (only a fallback if shQuote fix proves insufficient)",
+    "Refactoring or consolidating the two overlapping test files beyond what is needed for this fix",
+    "Changes to GitHub API interaction beyond shell argument quoting"
+  ],
+  "status": "ready",
+  "contractIssues": [],
+  "advisoryNotes": [
+    "The reference implementation in `inline-git-commands.ts` should be consulted to ensure consistency with the existing repo pattern.",
+    "Consider extracting the POSIX `shQuote` into a shared utility to avoid having two implementations in the codebase.",
+    "If any of the 17+ call sites pass arguments with unusual characters (e.g., Unicode, null bytes), those should be spot-checked after the change.",
+    "The `--body-file` approach remains a viable fallback if any edge cases surface with very long PR descriptions or unusual character combinations."
+  ]
+}
