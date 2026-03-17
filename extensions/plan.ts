@@ -16,6 +16,11 @@ import { PlanningQnAComponent } from "./planning/question-ui.ts";
 
 type RelevantFile = { path: string; reason: string };
 
+type PlanningSource = {
+	kind: "scratch" | "file" | "link";
+	value: string;
+};
+
 type PlanningState = {
 	active: boolean;
 	title: string;
@@ -29,6 +34,7 @@ type PlanningState = {
 	contract?: ExecutionContract;
 	savedPath?: string;
 	savedContractPath?: string;
+	source?: PlanningSource;
 };
 
 const PLANNING_STATE_TYPE = "planning-session";
@@ -117,6 +123,288 @@ async function collectRepoSummary(repoRoot: string): Promise<{ repoContextSummar
 	};
 }
 
+function titleCaseFirst(input: string): string {
+	return input ? input.charAt(0).toUpperCase() + input.slice(1) : input;
+}
+
+function isProbablyUrl(input: string): boolean {
+	return /^https?:\/\//i.test(input.trim());
+}
+
+function truncateForPrompt(text: string, maxChars = 12000): string {
+	if (text.length <= maxChars) return text;
+	return `${text.slice(0, maxChars)}\n\n[truncated ${text.length - maxChars} characters]`;
+}
+
+function slugifyPart(input: string): string {
+	return input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function composeSlug(parts: Array<string | undefined>, maxLength = 96): string {
+	const normalized: string[] = [];
+	for (const part of parts) {
+		const slug = slugifyPart(part ?? "");
+		if (!slug) continue;
+		if (normalized[normalized.length - 1] === slug) continue;
+		normalized.push(slug);
+	}
+	const composed = normalized.join("-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+	return composed.slice(0, maxLength).replace(/-+$/g, "") || "plan";
+}
+
+function stripFileExtension(filePath: string): string {
+	return filePath.replace(/\.[^.]+$/g, "");
+}
+
+function extractPrimaryHeading(text: string): string | undefined {
+	const frontmatterTitle = text.match(/^(?:---\n[\s\S]*?\n)?title:\s*(.+)$/im)?.[1]?.trim();
+	if (frontmatterTitle) return frontmatterTitle;
+	const markdownHeading = text.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? text.match(/^##\s+(.+)$/m)?.[1]?.trim();
+	return markdownHeading || undefined;
+}
+
+function cleanDerivedTitle(title: string): string {
+	return title.replace(/\s+/g, " ").replace(/^\s*#\s*/, "").replace(/^plan:\s*/i, "").trim();
+}
+
+function stripGithubTitleSuffix(title: string): string {
+	return title
+		.replace(/\s*[·|]\s*GitHub\s*$/i, "")
+		.replace(/\s*[·|]\s*[^·|]+\/[^·|]+\s*$/i, "")
+		.replace(/\s*[·|]\s*[^·|]+\s*[·|]\s*GitHub\s*$/i, "")
+		.trim();
+}
+
+function parseGithubWorkItemLink(link: string): { owner: string; repo: string; kind: "issue" | "pr"; number: string } | undefined {
+	try {
+		const url = new URL(link);
+		if (!/^(www\.)?github\.com$/i.test(url.hostname)) return undefined;
+		const parts = url.pathname.split("/").filter(Boolean);
+		if (parts.length < 4) return undefined;
+		const [owner, repo, type, number] = parts;
+		if (!owner || !repo || !number) return undefined;
+		if (type === "issues") return { owner, repo, kind: "issue", number };
+		if (type === "pull") return { owner, repo, kind: "pr", number };
+		return undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function fetchLinkTitle(link: string): Promise<string | undefined> {
+	if (typeof fetch !== "function") return undefined;
+	try {
+		const response = await fetch(link, {
+			headers: {
+				"user-agent": "pi-extensions-plan/0.1",
+				accept: "text/html,application/xhtml+xml",
+			},
+		});
+		if (!response.ok) return undefined;
+		const html = await response.text();
+		const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]?.trim();
+		if (ogTitle) return cleanDerivedTitle(stripGithubTitleSuffix(ogTitle));
+		const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim();
+		if (!title) return undefined;
+		return cleanDerivedTitle(stripGithubTitleSuffix(title));
+	} catch {
+		return undefined;
+	}
+}
+
+function deriveTitleFromLink(link: string): string {
+	const github = parseGithubWorkItemLink(link);
+	if (github) return `${github.kind === "pr" ? "PR" : "Issue"} ${github.number}`;
+	try {
+		const url = new URL(link);
+		const tail = url.pathname.split("/").filter(Boolean).pop() ?? url.hostname;
+		return titleCaseFirst(tail.replace(/[-_]+/g, " ")) || "Plan from link";
+	} catch {
+		return "Plan from link";
+	}
+}
+
+function deriveSmartLinkIdentity(link: string, fetchedTitle?: string): { title: string; slug: string } {
+	const github = parseGithubWorkItemLink(link);
+	const cleanFetchedTitle = fetchedTitle ? cleanDerivedTitle(stripGithubTitleSuffix(fetchedTitle)) : undefined;
+	if (github) {
+		const title = cleanFetchedTitle ? `${github.kind === "pr" ? "PR" : "Issue"} ${github.number}: ${cleanFetchedTitle}` : deriveTitleFromLink(link);
+		return {
+			title,
+			slug: composeSlug([github.repo, github.kind, github.number, cleanFetchedTitle]),
+		};
+	}
+	try {
+		const url = new URL(link);
+		const tail = url.pathname.split("/").filter(Boolean).pop() ?? url.hostname;
+		const baseTitle = cleanFetchedTitle || deriveTitleFromLink(link);
+		return {
+			title: baseTitle,
+			slug: composeSlug([url.hostname.replace(/^www\./i, ""), tail, baseTitle]),
+		};
+	} catch {
+		const baseTitle = cleanFetchedTitle || deriveTitleFromLink(link);
+		return { title: baseTitle, slug: composeSlug([baseTitle]) };
+	}
+}
+
+function deriveSmartFileIdentity(relativePath: string, fileText: string): { title: string; slug: string } {
+	const heading = extractPrimaryHeading(fileText);
+	const fallbackTitle = derivePlanTitleFromPath(relativePath);
+	const title = cleanDerivedTitle(heading || fallbackTitle) || fallbackTitle;
+	const relativeStem = stripFileExtension(relativePath).replace(/[\\/]+/g, "-");
+	return {
+		title: titleCaseFirst(title),
+		slug: composeSlug([relativeStem, title]),
+	};
+}
+
+function derivePlanTitleFromPath(filePath: string): string {
+	return path.basename(filePath).replace(/\.plan\.md$/i, "").replace(/\.md$/i, "").replace(/[-_]+/g, " ").trim() || "plan";
+}
+
+function extractRequestedFeature(rawDraft: string, fallback: string): string {
+	return rawDraft.match(/^##\s+Requested feature\s*\n([\s\S]*?)(?:\n##\s+|$)/im)?.[1]?.replace(/\s+/g, " ").trim() || fallback;
+}
+
+function ensureTrailingNewline(text: string): string {
+	return text.endsWith("\n") ? text : text + "\n";
+}
+
+function resolvePathWithinRepo(repoRoot: string, candidatePath: string): { absolutePath: string; relativePath: string } | undefined {
+	const absolutePath = path.resolve(repoRoot, candidatePath);
+	const relativePath = path.relative(repoRoot, absolutePath);
+	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return undefined;
+	return { absolutePath, relativePath };
+}
+
+async function persistRawPlanDraft(repoRoot: string, rawRelativePath: string, rawDraft: string): Promise<string> {
+	const resolvedPath = resolvePathWithinRepo(repoRoot, rawRelativePath);
+	if (!resolvedPath) throw new Error(`Refusing to write raw plan outside the repository root: ${rawRelativePath}`);
+	const rawAbsolutePath = resolvedPath.absolutePath;
+	await fs.mkdir(path.dirname(rawAbsolutePath), { recursive: true });
+	await fs.writeFile(rawAbsolutePath, ensureTrailingNewline(rawDraft), "utf8");
+	return rawAbsolutePath;
+}
+
+type ResolvedPlanSaveInput = {
+	rawRelativePath: string;
+	rawAbsolutePath: string;
+	rawDraft: string;
+	title: string;
+	originalInput: string;
+	repoContextSummary?: string;
+	relevantFiles: RelevantFile[];
+	source: "requested-file" | "requested-state" | "active-file" | "active-state";
+};
+
+async function resolvePlanSaveInput(input: {
+	repoRoot: string;
+	state?: PlanningState;
+	requestedPath?: string;
+}): Promise<ResolvedPlanSaveInput | undefined> {
+	const { repoRoot, state } = input;
+	const requestedPath = input.requestedPath?.trim();
+	let repoContextSummary = state?.repoContextSummary;
+	let relevantFiles = state?.relevantFiles ?? [];
+	const ensureRepoContext = async () => {
+		if (!repoContextSummary) {
+			const collected = await collectRepoSummary(repoRoot);
+			repoContextSummary = collected.repoContextSummary;
+			relevantFiles = collected.relevantFiles;
+		}
+	};
+
+	if (requestedPath) {
+		const resolvedPath = resolvePathWithinRepo(repoRoot, requestedPath);
+		if (!resolvedPath) throw new Error(`Requested path must stay within the repository root: ${requestedPath}`);
+		const { absolutePath: rawAbsolutePath, relativePath: rawRelativePath } = resolvedPath;
+		if (await exists(rawAbsolutePath)) {
+			const rawDraft = await fs.readFile(rawAbsolutePath, "utf8");
+			await ensureRepoContext();
+			const title = cleanDerivedTitle(extractPrimaryHeading(rawDraft) ?? derivePlanTitleFromPath(rawRelativePath)) || derivePlanTitleFromPath(rawRelativePath);
+			return {
+				rawRelativePath,
+				rawAbsolutePath,
+				rawDraft,
+				title,
+				originalInput: extractRequestedFeature(rawDraft, state?.originalInput ?? title),
+				repoContextSummary,
+				relevantFiles,
+				source: "requested-file",
+			};
+		}
+		if (state?.active && state.rawDraft) {
+			await ensureRepoContext();
+			const title = state.title || derivePlanTitleFromPath(rawAbsolutePath);
+			return {
+				rawRelativePath,
+				rawAbsolutePath,
+				rawDraft: state.rawDraft,
+				title,
+				originalInput: state.originalInput || title,
+				repoContextSummary,
+				relevantFiles,
+				source: "requested-state",
+			};
+		}
+		return undefined;
+	}
+
+	if (!state?.active || !state.rawDraft) return undefined;
+	const rawRelativePath = state.savedPath ?? buildRawPlanPath(state.slug);
+	const rawAbsolutePath = path.join(repoRoot, rawRelativePath);
+	const fileExists = await exists(rawAbsolutePath);
+	return {
+		rawRelativePath,
+		rawAbsolutePath,
+		rawDraft: fileExists ? await fs.readFile(rawAbsolutePath, "utf8") : state.rawDraft,
+		title: state.title,
+		originalInput: state.originalInput,
+		repoContextSummary,
+		relevantFiles,
+		source: fileExists ? "active-file" : "active-state",
+	};
+}
+
+type StartPlanningOptions = {
+	mode: PlanningSource["kind"];
+	input: string;
+	repoRoot: string;
+	repoContextSummary: string;
+	relevantFiles: RelevantFile[];
+	title: string;
+	slug?: string;
+	initialDraft: string;
+	promptBlocks: string[];
+};
+
+async function startPlanningSession(pi: ExtensionAPI, ctx: any, options: StartPlanningOptions): Promise<void> {
+	const slug = options.slug || slugify(options.title || options.input);
+	const rawPlanPath = buildRawPlanPath(slug);
+	const state: PlanningState = {
+		active: true,
+		title: options.title,
+		slug,
+		originalInput: options.input,
+		repoRoot: options.repoRoot,
+		repoContextSummary: options.repoContextSummary,
+		relevantFiles: options.relevantFiles,
+		rawDraft: options.initialDraft,
+		questions: extractOpenQuestionsFromRawPlan(options.initialDraft),
+		savedPath: rawPlanPath,
+		source: { kind: options.mode, value: options.input },
+	};
+	await applyState({ ...ctx, pi }, state);
+	try {
+		await persistRawPlanDraft(options.repoRoot, rawPlanPath, options.initialDraft);
+	} catch (error) {
+		notify(ctx, `Could not initialize the raw plan draft at ${rawPlanPath}: ${(error as Error).message}`, "warning");
+	}
+	notify(ctx, `Planning started. Canonical draft path: ${rawPlanPath}. Refine that draft, then run /plan-save.`, "info");
+	if (typeof pi.sendUserMessage === "function") pi.sendUserMessage(options.promptBlocks.join("\n\n"));
+}
+
 async function maybeAskClarifyingQuestions(pi: ExtensionAPI, state: PlanningState): Promise<void> {
 	const openQuestions = state.questions.filter((question) => question.status === "open");
 	if (openQuestions.length === 0) return;
@@ -154,9 +442,24 @@ function extractAssistantText(message: any): string {
 
 export const __testables = {
 	slugify,
+	slugifyPart,
+	composeSlug,
+	titleCaseFirst,
+	isProbablyUrl,
+	truncateForPrompt,
+	extractPrimaryHeading,
+	deriveTitleFromLink,
+	deriveSmartLinkIdentity,
+	deriveSmartFileIdentity,
+	parseGithubWorkItemLink,
 	renderRawPlanMarkdown,
 	buildRawPlanPath,
 	buildExecutionContractPath,
+	derivePlanTitleFromPath,
+	extractRequestedFeature,
+	resolvePathWithinRepo,
+	persistRawPlanDraft,
+	resolvePlanSaveInput,
 	extractAssistantText,
 	getState,
 	loadPersistedState,
@@ -175,46 +478,171 @@ export default function planExtension(pi: ExtensionAPI) {
 		loadPersistedState(ctx);
 	});
 
+	const startFromScratch = async (input: string, ctx: any, commandName = "plan") => {
+		if (!input) {
+			notify(ctx, `Usage: /${commandName} <feature brief>`, "warning");
+			return;
+		}
+		notify(ctx, "Collecting planning context...", "info");
+		const repoRoot = await detectRepoRoot(ctx.cwd ?? process.cwd());
+		const { repoContextSummary, relevantFiles } = await collectRepoSummary(repoRoot);
+		const title = titleCaseFirst(input);
+		const slug = slugify(title);
+		const initialDraft = renderRawPlanMarkdown({
+			title,
+			requestedFeature: input,
+			repoContextSummary,
+		});
+		await startPlanningSession(pi, ctx, {
+			mode: "scratch",
+			input,
+			repoRoot,
+			repoContextSummary,
+			relevantFiles,
+			title,
+			slug,
+			initialDraft,
+			promptBlocks: [
+				"You are in planning mode.",
+				"Produce a rich raw plan artifact in markdown.",
+				"Do not force one rigid schema.",
+				"Be explicit about evidence, intended behavior, ambiguities, and checks.",
+				"If key information is missing, include a concise `## Open questions` section with only high-value clarifications.",
+				`Canonical raw plan path: ${buildRawPlanPath(slug)}`,
+				"If you write the plan to disk, keep it at that canonical path unless the user explicitly asks for a different location.",
+				"Avoid creating a separate docs/ planning file by default; /plan-save without arguments will use the canonical draft path above.",
+				`Requested feature: ${input}`,
+				repoContextSummary,
+			],
+		});
+	};
+
+	const startFromFile = async (input: string, ctx: any) => {
+		if (!input) {
+			notify(ctx, "Usage: /plan-from-file <path>", "warning");
+			return;
+		}
+		notify(ctx, "Collecting planning context...", "info");
+		const repoRoot = await detectRepoRoot(ctx.cwd ?? process.cwd());
+		const resolvedPath = resolvePathWithinRepo(repoRoot, input);
+		if (!resolvedPath) {
+			notify(ctx, `Source file must stay within the repository root: ${input}`, "warning");
+			return;
+		}
+		const { absolutePath, relativePath } = resolvedPath;
+		if (!(await exists(absolutePath))) {
+			notify(ctx, `Source file not found: ${absolutePath}`, "warning");
+			return;
+		}
+		const { repoContextSummary, relevantFiles } = await collectRepoSummary(repoRoot);
+		const fileText = await fs.readFile(absolutePath, "utf8");
+		const identity = deriveSmartFileIdentity(relativePath, fileText);
+		const requestedFeature = `Plan the work described in ${relativePath}`;
+		const initialDraft = renderRawPlanMarkdown({
+			title: identity.title,
+			requestedFeature,
+			repoContextSummary,
+			sections: [{ heading: "Primary source", items: [`File: ${relativePath}`] }],
+		});
+		await startPlanningSession(pi, ctx, {
+			mode: "file",
+			input: relativePath,
+			repoRoot,
+			repoContextSummary,
+			relevantFiles,
+			title: identity.title,
+			slug: identity.slug,
+			initialDraft,
+			promptBlocks: [
+				"You are in planning mode.",
+				"Use the supplied repository file as the primary planning source.",
+				"Read it carefully and extract requirements, intended behavior, constraints, evidence, and checks.",
+				"Do not force one rigid schema.",
+				"If key information is missing, include a concise `## Open questions` section with only high-value clarifications.",
+				`Canonical raw plan path: ${buildRawPlanPath(identity.slug)}`,
+				`Primary source file: ${relativePath}`,
+				repoContextSummary,
+				["Source file contents:", "```", truncateForPrompt(fileText), "```"].join("\n"),
+			],
+		});
+	};
+
+	const startFromLink = async (input: string, ctx: any) => {
+		if (!input) {
+			notify(ctx, "Usage: /plan-from-link <url>", "warning");
+			return;
+		}
+		if (!isProbablyUrl(input)) {
+			notify(ctx, `Expected a URL, got: ${input}`, "warning");
+			return;
+		}
+		notify(ctx, "Collecting planning context...", "info");
+		const repoRoot = await detectRepoRoot(ctx.cwd ?? process.cwd());
+		const { repoContextSummary, relevantFiles } = await collectRepoSummary(repoRoot);
+		const fetchedTitle = await fetchLinkTitle(input);
+		const identity = deriveSmartLinkIdentity(input, fetchedTitle);
+		const requestedFeature = `Plan the work described at ${input}`;
+		const initialDraft = renderRawPlanMarkdown({
+			title: identity.title,
+			requestedFeature,
+			repoContextSummary,
+			sections: [{ heading: "Primary source", items: [`Link: ${input}`] }],
+		});
+		await startPlanningSession(pi, ctx, {
+			mode: "link",
+			input,
+			repoRoot,
+			repoContextSummary,
+			relevantFiles,
+			title: identity.title,
+			slug: identity.slug,
+			initialDraft,
+			promptBlocks: [
+				"You are in planning mode.",
+				"Use the supplied link as the primary planning source.",
+				"Fetch/read the link before drafting the plan.",
+				"If it is a GitHub issue or PR, extract the title, problem statement, acceptance criteria, constraints, referenced files, and unresolved questions.",
+				"Be explicit about evidence, intended behavior, ambiguities, and checks.",
+				"Do not force one rigid schema.",
+				"If key information is missing, include a concise `## Open questions` section with only high-value clarifications.",
+				`Canonical raw plan path: ${buildRawPlanPath(identity.slug)}`,
+				`Primary source link: ${input}`,
+				repoContextSummary,
+			],
+		});
+	};
+
 	pi.registerCommand("plan", {
-		description: "Start a clean-slate planning session",
+		description: "Start a planning session from a brief or URL",
 		handler: async (args, ctx) => {
 			const input = (args ?? "").trim();
-			if (!input) {
-				notify(ctx, "Usage: /plan <feature brief>", "warning");
+			if (isProbablyUrl(input)) {
+				notify(ctx, "Detected a link. Starting link-based planning.", "info");
+				await startFromLink(input, ctx);
 				return;
 			}
-			notify(ctx, "Collecting planning context...", "info");
-			const repoRoot = await detectRepoRoot(ctx.cwd ?? process.cwd());
-			const { repoContextSummary, relevantFiles } = await collectRepoSummary(repoRoot);
-			const initialDraft = renderRawPlanMarkdown({
-				title: input.charAt(0).toUpperCase() + input.slice(1),
-				requestedFeature: input,
-				repoContextSummary,
-			});
-			const state: PlanningState = {
-				active: true,
-				title: input.charAt(0).toUpperCase() + input.slice(1),
-				slug: slugify(input),
-				originalInput: input,
-				repoRoot,
-				repoContextSummary,
-				relevantFiles,
-				rawDraft: initialDraft,
-				questions: extractOpenQuestionsFromRawPlan(initialDraft),
-			};
-			await applyState({ ...ctx, pi }, state);
-			notify(ctx, "Planning started. Refine the raw plan, then run /plan-save.", "info");
-			if (typeof pi.sendUserMessage === "function") {
-				pi.sendUserMessage([
-					"You are in planning mode.",
-					"Produce a rich raw plan artifact in markdown.",
-					"Do not force one rigid schema.",
-					"Be explicit about evidence, intended behavior, ambiguities, and checks.",
-					"If key information is missing, include a concise `## Open questions` section with only high-value clarifications.",
-					`Requested feature: ${input}`,
-					repoContextSummary,
-				].join("\n\n"));
-			}
+			await startFromScratch(input, ctx, "plan");
+		},
+	});
+
+	pi.registerCommand("plan-from-scratch", {
+		description: "Start a planning session from a feature brief",
+		handler: async (args, ctx) => {
+			await startFromScratch((args ?? "").trim(), ctx, "plan-from-scratch");
+		},
+	});
+
+	pi.registerCommand("plan-from-file", {
+		description: "Start a planning session from a local file",
+		handler: async (args, ctx) => {
+			await startFromFile((args ?? "").trim(), ctx);
+		},
+	});
+
+	pi.registerCommand("plan-from-link", {
+		description: "Start a planning session from a URL such as a GitHub issue",
+		handler: async (args, ctx) => {
+			await startFromLink((args ?? "").trim(), ctx);
 		},
 	});
 
@@ -225,11 +653,18 @@ export default function planExtension(pi: ExtensionAPI) {
 		if (!text) return;
 		if (/^# /m.test(text) || /^## /m.test(text)) {
 			const extractedQuestions = extractOpenQuestionsFromRawPlan(text);
+			const rawPlanPath = state.savedPath ?? buildRawPlanPath(state.slug);
 			const nextState = await applyState({ ...ctx, pi }, {
 				...state,
 				rawDraft: text,
 				questions: mergeQuestions(state.questions, extractedQuestions),
+				savedPath: rawPlanPath,
 			});
+			try {
+				await persistRawPlanDraft(nextState.repoRoot, rawPlanPath, text);
+			} catch {
+				// Best-effort sync only; plan-save still falls back to in-memory draft.
+			}
 			await maybeAskClarifyingQuestions(pi, nextState);
 		}
 	});
@@ -298,43 +733,30 @@ export default function planExtension(pi: ExtensionAPI) {
 			try {
 				const requestedPath = (args ?? "").trim();
 				const repoRoot = state?.repoRoot ?? await detectRepoRoot(ctx.cwd ?? process.cwd());
-				let rawRelativePath: string;
-				let rawAbsolutePath: string;
-				let rawDraft: string;
-				let title: string;
-				let originalInput: string;
-				let repoContextSummary = state?.repoContextSummary;
-				let relevantFiles = state?.relevantFiles ?? [];
-
-				if (requestedPath) {
-					rawAbsolutePath = path.resolve(repoRoot, requestedPath);
-					if (!(await exists(rawAbsolutePath))) {
-						notify(ctx, `Plan file not found: ${rawAbsolutePath}`, "warning");
-						return;
-					}
-					rawRelativePath = path.relative(repoRoot, rawAbsolutePath);
-					rawDraft = await fs.readFile(rawAbsolutePath, "utf8");
-					title = path.basename(rawAbsolutePath).replace(/\.plan\.md$/i, "").replace(/[-_]+/g, " ");
-					originalInput = rawDraft.match(/^##\s+Requested feature\s*\n([\s\S]*?)(?:\n##\s+|$)/im)?.[1]?.replace(/\s+/g, " ").trim() || title;
-					if (!repoContextSummary) {
-						const collected = await collectRepoSummary(repoRoot);
-						repoContextSummary = collected.repoContextSummary;
-						relevantFiles = collected.relevantFiles;
-					}
-				} else if (state?.active && state.rawDraft) {
-					rawRelativePath = state.savedPath ?? buildRawPlanPath(state.slug);
-					rawAbsolutePath = path.join(repoRoot, rawRelativePath);
-					rawDraft = state.rawDraft;
-					title = state.title;
-					originalInput = state.originalInput;
-				} else {
-					notify(ctx, "No active planning draft to save. Pass a .plan.md path to /plan-save or start /plan first.", "warning");
+				const resolved = await resolvePlanSaveInput({
+					repoRoot,
+					state,
+					requestedPath,
+				});
+				if (!resolved) {
+					notify(ctx, "No active planning draft to save. Pass an existing .plan.md path to /plan-save or start /plan first.", "warning");
 					return;
 				}
 
+				const {
+					rawRelativePath,
+					rawAbsolutePath,
+					rawDraft,
+					title,
+					originalInput,
+					repoContextSummary,
+					relevantFiles,
+					source,
+				} = resolved;
 				const contractRelativePath = buildExecutionContractPath(rawRelativePath);
 				const contractAbsolutePath = path.join(repoRoot, contractRelativePath);
 				await fs.mkdir(path.dirname(rawAbsolutePath), { recursive: true });
+				if (requestedPath && source === "requested-state") notify(ctx, `Saving the current planning draft to ${rawRelativePath}.`, "info");
 				notify(ctx, "Extracting execution contract...", "info");
 				const contract = await extractExecutionContract(ctx as any, {
 					rawArtifactPath: rawRelativePath,
@@ -359,7 +781,7 @@ export default function planExtension(pi: ExtensionAPI) {
 					advisoryNotes: [],
 				};
 				const renderedRaw = finalContract.status === "ready" ? renderMarkdownFromExecutionContract(finalContract, title) : rawDraft;
-				await fs.writeFile(rawAbsolutePath, renderedRaw.endsWith("\n") ? renderedRaw : renderedRaw + "\n", "utf8");
+				await persistRawPlanDraft(repoRoot, rawRelativePath, renderedRaw);
 				await fs.writeFile(contractAbsolutePath, JSON.stringify(finalContract, null, 2) + "\n", "utf8");
 				await applyState({ ...ctx, pi }, {
 					active: true,
@@ -374,6 +796,7 @@ export default function planExtension(pi: ExtensionAPI) {
 					contract: finalContract,
 					savedPath: rawRelativePath,
 					savedContractPath: contractRelativePath,
+					source: state?.source,
 				});
 				notify(ctx, `Raw plan saved: ${rawRelativePath}`, "info");
 				notify(ctx, `Execution contract saved: ${contractRelativePath}`, "info");
@@ -404,7 +827,9 @@ export default function planExtension(pi: ExtensionAPI) {
 			const openQuestions = state.questions.filter((q) => q.status === "open").length;
 			const answeredQuestions = state.questions.filter((q) => q.status === "answered").length;
 			const contractStatus = state.contract ? ` | contract: ${state.contract.status}` : "";
-			notify(ctx, `Planning active: ${state.title} | open questions: ${openQuestions} | answered: ${answeredQuestions}${contractStatus}`, "info");
+			const rawPlanPath = state.savedPath ? ` | draft: ${state.savedPath}` : "";
+			const source = state.source ? ` | source: ${state.source.kind}=${state.source.value}` : "";
+			notify(ctx, `Planning active: ${state.title} | open questions: ${openQuestions} | answered: ${answeredQuestions}${contractStatus}${rawPlanPath}${source}`, "info");
 		},
 	});
 

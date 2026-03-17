@@ -21,8 +21,11 @@ Notable behavior:
 Interactive planning workflow inside pi. Produces a structured raw plan and extracts an execution contract.
 
 Commands:
-- `/plan <feature brief>` — start a planning session, collect repo context, and begin producing a raw plan artifact.
-- `/plan-save [path]` — save the current plan markdown and extract an execution contract.
+- `/plan <feature brief|url>` — start a planning session from a feature brief, or auto-switch to link-based planning when the argument is a URL.
+- `/plan-from-scratch <feature brief>` — start a planning session from a plain-language brief.
+- `/plan-from-file <path>` — start a planning session grounded in an existing local file.
+- `/plan-from-link <url>` — start a planning session grounded in an external link such as a GitHub issue.
+- `/plan-save [path]` — save the current plan markdown and extract an execution contract. If `path` exists, it is read as the plan source; otherwise, an active in-memory draft is saved to that path first.
 - `/plan-answer` — provide answers to open planning questions (supports TUI and inline input).
 - `/plan-status` — show the current planning session status.
 - `/plan-next` — show the saved execution contract path for the next implementation step.
@@ -31,8 +34,10 @@ Commands:
 Notable behavior:
 - Persists planning session state across session navigation.
 - Extracts repo context and relevant files automatically.
-- Supports interactive clarification questions in the TUI.
-- Saves plans under `.pi/plans/` and execution contracts as `.plan.contract.json` siblings.
+- Uses mode-specific planning prompts for scratch briefs, local files, and external links.
+- Derives smarter plan/contract filenames from source context (for example, file paths and GitHub issue numbers/titles).
+- Keeps a canonical raw plan draft under `.pi/plans/` and saves execution contracts as `.plan.contract.json` siblings.
+- Syncs markdown plans produced in chat back to the canonical draft path so `/plan-save` and `/implement-plan-loop` stay aligned.
 
 ### `extensions/planning/`
 Shared modules for the planning workflow:
