@@ -17,6 +17,23 @@ Notable behavior:
 - Mirrors metadata/history to the shared checkout root so `start`, `pr`, and `cleanup` keep working across main and linked worktrees.
 - Records failures and lifecycle history for managed worktrees.
 
+### `extensions/pr-review-cycle.ts`
+PR review follow-up workflow for the current branch's open GitHub PR.
+
+Commands:
+- `/pr-review-fix` — gather CodeRabbit/Codex review feedback for the current PR, inject a normalized repair brief into pi, and auto-commit/push any resulting fixes only after a successful agent run ends.
+- `/pr-review-status` — show the current PR review-fix workflow status.
+- `/pr-review-clear` — clear persisted PR review-fix state and footer status.
+
+Notable behavior:
+- Verifies git + `gh` preconditions before starting.
+- Requires a clean working tree before `/pr-review-fix` starts, so existing local changes are never swept into the generated PR-review commit.
+- Fetches PR review data with `gh pr view --json`.
+- Normalizes and dedupes CodeRabbit/Codex findings before handing off to the agent.
+- Skips automatic commit/push when the repair run aborts or ends with an agent error.
+- Pushes to the current branch's configured tracking remote instead of assuming `origin`.
+- Owns deterministic completion with commit message `pr-review: address AI review feedback for #<pr-number>`.
+
 ### `extensions/plan.ts`
 Interactive planning workflow inside pi. Produces a structured raw plan and extracts an execution contract.
 
@@ -90,6 +107,7 @@ For local development, either:
 ## Repository layout
 
 - `extensions/worktree.ts` — managed worktree lifecycle commands
+- `extensions/pr-review-cycle.ts` — PR review follow-up with bot feedback ingestion and auto commit/push
 - `extensions/plan.ts` — interactive planning workflow
 - `extensions/planning/` — shared planning modules (contract extraction, validation, question loop, TUI)
 - `extensions/implement-plan-loop.ts` — automated implementation/review loop
