@@ -57,6 +57,7 @@ import {
 const TODO_DIR_NAME = ".pi/todos";
 const TODO_PATH_ENV = "PI_TODO_PATH";
 const TODO_SETTINGS_NAME = "settings.json";
+const TODO_TRASH_DIR_NAME = ".trash";
 const TODO_ID_PREFIX = "TODO-";
 const TODO_ID_PATTERN = /^[a-f0-9]{8}$/i;
 const DEFAULT_TODO_SETTINGS = {
@@ -256,6 +257,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 	private headerText: Text;
 	private hintText: Text;
 	private currentSessionId?: string;
+	private onQuickAction?: (todo: TodoFrontMatter, action: "work" | "refine") => void;
 
 	private _focused = false;
 	get focused(): boolean {
@@ -274,12 +276,13 @@ class TodoSelectorComponent extends Container implements Focusable {
 		onCancel: () => void,
 		initialSearchInput?: string,
 		currentSessionId?: string,
-		private onQuickAction?: (todo: TodoFrontMatter, action: "work" | "refine") => void,
+		onQuickAction?: (todo: TodoFrontMatter, action: "work" | "refine") => void,
 	) {
 		super();
 		this.tui = tui;
 		this.theme = theme;
 		this.currentSessionId = currentSessionId;
+		this.onQuickAction = onQuickAction;
 		this.allTodos = todos;
 		this.filteredTodos = todos;
 		this.onSelectCallback = onSelect;
@@ -470,7 +473,7 @@ class TodoActionMenuComponent extends Container {
 				: []),
 			{ value: "copyPath", label: "copy path", description: "Copy absolute path to clipboard" },
 			{ value: "copyText", label: "copy text", description: "Copy title and body to clipboard" },
-			{ value: "delete", label: "delete", description: "Delete todo" },
+			{ value: "delete", label: "delete", description: "Move todo to trash" },
 		];
 
 		this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
@@ -787,6 +790,16 @@ async function garbageCollectTodos(todosDir: string, settings: TodoSettings): Pr
 
 function getTodoPath(todosDir: string, id: string): string {
 	return path.join(todosDir, `${id}.md`);
+}
+
+function getTodoTrashDir(todosDir: string): string {
+	return path.join(todosDir, TODO_TRASH_DIR_NAME);
+}
+
+function getTrashedTodoPath(todosDir: string, id: string): string {
+	const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const suffix = crypto.randomBytes(2).toString("hex");
+	return path.join(getTodoTrashDir(todosDir), `${id}-${timestamp}-${suffix}.md`);
 }
 
 function getLockPath(todosDir: string, id: string): string {
@@ -1420,7 +1433,9 @@ async function deleteTodo(
 	const result = await withTodoLock(todosDir, normalizedId, ctx, async () => {
 		const existing = await ensureTodoExists(filePath, normalizedId);
 		if (!existing) return { error: `Todo ${displayTodoId(id)} not found` } as const;
-		await fs.unlink(filePath);
+		const trashDir = getTodoTrashDir(todosDir);
+		await fs.mkdir(trashDir, { recursive: true });
+		await fs.rename(filePath, getTrashedTodoPath(todosDir, normalizedId));
 		return existing;
 	});
 
@@ -1446,9 +1461,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 		label: "Todo",
 		description:
 			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release). ` +
-			"Title is the short summary; body is long-form markdown notes (update replaces, append adds). " +
+			"Title is the short summary; body is long-form markdown notes (update replaces; append adds). " +
 			"Todo ids are shown as TODO-<hex>; id parameters accept TODO-<hex> or the raw hex filename. " +
-			"Claim tasks before working on them to avoid conflicts, and close them when complete.", 
+			"Delete moves todo files into a recoverable trash folder. Claim tasks before working on them to avoid conflicts, and close them when complete.",
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1781,7 +1796,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						: details.action === "append"
 							? "Appended to"
 							: details.action === "delete"
-								? "Deleted"
+								? "Moved to trash"
 								: details.action === "claim"
 									? "Claimed"
 									: details.action === "release"
@@ -1914,21 +1929,56 @@ export default function todosExtension(pi: ExtensionAPI) {
 					return action ?? "back";
 				};
 
+				const claimTodoForPromptAction = async (
+					record: TodoRecord,
+					action: "work" | "refine",
+				): Promise<TodoRecord | null> => {
+					const assignedSessionId = record.assigned_to_session;
+					const currentSessionId = ctx.sessionManager.getSessionId();
+					let forceClaim = false;
+					if (assignedSessionId && assignedSessionId !== currentSessionId) {
+						const actionLabel = action === "refine" ? "refine it" : "work on it";
+						forceClaim = await ctx.ui.confirm(
+							"Todo already assigned",
+							`Todo ${formatTodoId(record.id)} is assigned to session ${assignedSessionId}. Force claim it to ${actionLabel}?`,
+						);
+						if (!forceClaim) {
+							return null;
+						}
+					}
+					const result = await claimTodoAssignment(todosDir, record.id, ctx, forceClaim);
+					if ("error" in result) {
+						ctx.ui.notify(result.error, "error");
+						return null;
+					}
+					const updatedTodos = await listTodos(todosDir);
+					selector?.setTodos(updatedTodos);
+					return result;
+				};
+
+				const launchPromptAction = async (
+					todo: TodoFrontMatter | TodoRecord,
+					action: "work" | "refine",
+				): Promise<boolean> => {
+					const record = "body" in todo ? todo : await resolveTodoRecord(todo);
+					if (!record) return false;
+					const claimedTodo = await claimTodoForPromptAction(record, action);
+					if (!claimedTodo) return false;
+					const title = claimedTodo.title || "(untitled)";
+					nextPrompt =
+						action === "refine"
+							? buildRefinePrompt(claimedTodo.id, title)
+							: `work on todo ${formatTodoId(claimedTodo.id)} "${title}"`;
+					done();
+					return true;
+				};
+
 				const applyTodoAction = async (
 					record: TodoRecord,
 					action: TodoMenuAction,
 				): Promise<"stay" | "exit"> => {
-					if (action === "refine") {
-						const title = record.title || "(untitled)";
-						nextPrompt = buildRefinePrompt(record.id, title);
-						done();
-						return "exit";
-					}
-					if (action === "work") {
-						const title = record.title || "(untitled)";
-						nextPrompt = `work on todo ${formatTodoId(record.id)} "${title}"`;
-						done();
-						return "exit";
+					if (action === "refine" || action === "work") {
+						return (await launchPromptAction(record, action)) ? "exit" : "stay";
 					}
 					if (action === "view") {
 						return "stay";
@@ -1974,7 +2024,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						}
 						const updatedTodos = await listTodos(todosDir);
 						selector?.setTodos(updatedTodos);
-						ctx.ui.notify(`Deleted todo ${formatTodoId(record.id)}`, "info");
+						ctx.ui.notify(`Moved todo ${formatTodoId(record.id)} to trash`, "info");
 						return "stay";
 					}
 
@@ -2008,7 +2058,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					if (action === "delete") {
-						const message = `Delete todo ${formatTodoId(record.id)}? This cannot be undone.`;
+						const message = `Move todo ${formatTodoId(record.id)} to trash? You can recover it from ${TODO_TRASH_DIR_NAME}.`;
 						deleteConfirm = new TodoDeleteConfirmComponent(theme, message, (confirmed) => {
 							if (!confirmed) {
 								setActiveComponent(actionMenu);
@@ -2060,12 +2110,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					searchTerm || undefined,
 					currentSessionId,
 					(todo, action) => {
-						const title = todo.title || "(untitled)";
-						nextPrompt =
-							action === "refine"
-								? buildRefinePrompt(todo.id, title)
-								: `work on todo ${formatTodoId(todo.id)} "${title}"`;
-						done();
+						void launchPromptAction(todo, action);
 					},
 				);
 

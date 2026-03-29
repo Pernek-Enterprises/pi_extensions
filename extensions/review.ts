@@ -361,8 +361,13 @@ type ReviewTarget =
 	| { type: "baseBranch"; branch: string }
 	| { type: "commit"; sha: string; title?: string }
 	| { type: "custom"; instructions: string }
-	| { type: "pullRequest"; prNumber: number; baseBranch: string; title: string }
+	| { type: "pullRequest"; prNumber: number; baseBranch: string; title: string; repo?: string }
 	| { type: "folder"; paths: string[] };
+
+type PrReference = {
+	prNumber: number;
+	repo?: string;
+};
 
 // Prompts (adapted from Codex)
 const UNCOMMITTED_PROMPT =
@@ -577,36 +582,46 @@ async function hasPendingChanges(pi: ExtensionAPI): Promise<boolean> {
 }
 
 /**
- * Parse a PR reference (URL or number) and return the PR number
+ * Parse a PR reference (URL or number) and preserve repository identity when available.
  */
-function parsePrReference(ref: string): number | null {
+function parsePrReference(ref: string): PrReference | null {
 	const trimmed = ref.trim();
 
 	// Try as a number first
 	const num = parseInt(trimmed, 10);
-	if (!isNaN(num) && num > 0) {
-		return num;
+	if (!isNaN(num) && num > 0 && String(num) === trimmed) {
+		return { prNumber: num };
 	}
 
 	// Try to extract from GitHub URL
 	// Formats: https://github.com/owner/repo/pull/123
 	//          github.com/owner/repo/pull/123
-	const urlMatch = trimmed.match(/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
+	const urlMatch = trimmed.match(/(?:https?:\/\/)?github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:[/?#].*)?$/i);
 	if (urlMatch) {
-		return parseInt(urlMatch[1], 10);
+		return {
+			repo: urlMatch[1],
+			prNumber: parseInt(urlMatch[2], 10),
+		};
 	}
 
 	return null;
 }
 
+function formatPrReference(ref: PrReference): string {
+	return ref.repo ? `${ref.repo}#${ref.prNumber}` : `#${ref.prNumber}`;
+}
+
+function buildGhPrArgs(command: "view" | "checkout", ref: PrReference, extraArgs: string[] = []): string[] {
+	return ["pr", command, String(ref.prNumber), ...(ref.repo ? ["-R", ref.repo] : []), ...extraArgs];
+}
+
 /**
  * Get PR information from GitHub CLI
  */
-async function getPrInfo(pi: ExtensionAPI, prNumber: number): Promise<{ baseBranch: string; title: string; headBranch: string } | null> {
-	const { stdout, code } = await pi.exec("gh", [
-		"pr", "view", String(prNumber),
+async function getPrInfo(pi: ExtensionAPI, prRef: PrReference): Promise<{ baseBranch: string; title: string; headBranch: string } | null> {
+	const { stdout, code } = await pi.exec("gh", buildGhPrArgs("view", prRef, [
 		"--json", "baseRefName,title,headRefName",
-	]);
+	]));
 
 	if (code !== 0) return null;
 
@@ -625,8 +640,8 @@ async function getPrInfo(pi: ExtensionAPI, prNumber: number): Promise<{ baseBran
 /**
  * Checkout a PR using GitHub CLI
  */
-async function checkoutPr(pi: ExtensionAPI, prNumber: number): Promise<{ success: boolean; error?: string }> {
-	const { stdout, stderr, code } = await pi.exec("gh", ["pr", "checkout", String(prNumber)]);
+async function checkoutPr(pi: ExtensionAPI, prRef: PrReference): Promise<{ success: boolean; error?: string }> {
+	const { stdout, stderr, code } = await pi.exec("gh", buildGhPrArgs("checkout", prRef));
 
 	if (code !== 0) {
 		return { success: false, error: stderr || stdout || "Failed to checkout PR" };
@@ -733,7 +748,8 @@ function getUserFacingHint(target: ReviewTarget): string {
 
 		case "pullRequest": {
 			const shortTitle = target.title.length > 30 ? target.title.slice(0, 27) + "..." : target.title;
-			return `PR #${target.prNumber}: ${shortTitle}`;
+			const prLabel = target.repo ? `${target.repo}#${target.prNumber}` : `#${target.prNumber}`;
+			return `PR ${prLabel}: ${shortTitle}`;
 		}
 
 		case "folder": {
@@ -1209,11 +1225,78 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		return { type: "custom", instructions: result.trim() };
 	}
 
-	function parseReviewPaths(value: string): string[] {
-		return value
-			.split(/\s+/)
+	function parseQuotedReviewPaths(line: string): string[] {
+		const items: string[] = [];
+		let current = "";
+		let quote: '"' | "'" | null = null;
+		let escaping = false;
+
+		for (const char of line) {
+			if (escaping) {
+				current += char;
+				escaping = false;
+				continue;
+			}
+
+			if (quote) {
+				if (char === quote) {
+					quote = null;
+					continue;
+				}
+				if (char === "\\") {
+					escaping = true;
+					continue;
+				}
+				current += char;
+				continue;
+			}
+
+			if (char === '"' || char === "'") {
+				quote = char;
+				continue;
+			}
+			if (/\s/.test(char)) {
+				if (current) {
+					items.push(current);
+					current = "";
+				}
+				continue;
+			}
+			if (char === "\\") {
+				escaping = true;
+				continue;
+			}
+			current += char;
+		}
+
+		if (escaping) {
+			current += "\\";
+		}
+		if (current) {
+			items.push(current);
+		}
+
+		return items;
+	}
+
+	async function parseReviewPaths(value: string, cwd: string): Promise<string[]> {
+		const lines = value
+			.replace(/\r\n?/g, "\n")
+			.split("\n")
 			.map((item) => item.trim())
 			.filter((item) => item.length > 0);
+
+		if (lines.length === 0) return [];
+		if (lines.length > 1) return lines;
+
+		const singleLine = lines[0];
+		const resolvedPath = path.resolve(cwd, singleLine);
+		try {
+			await fs.access(resolvedPath);
+			return [singleLine];
+		} catch {
+			return parseQuotedReviewPaths(singleLine);
+		}
 	}
 
 	/**
@@ -1221,12 +1304,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
 	 */
 	async function showFolderInput(ctx: ExtensionContext): Promise<ReviewTarget | null> {
 		const result = await ctx.ui.editor(
-			"Enter folders/files to review (space-separated or one per line):",
+			"Enter folders/files to review (prefer one per line; quote paths with spaces if using one line):",
 			".",
 		);
 
 		if (!result?.trim()) return null;
-		const paths = parseReviewPaths(result);
+		const paths = await parseReviewPaths(result, ctx.cwd);
 		if (paths.length === 0) return null;
 
 		return { type: "folder", paths };
@@ -1250,18 +1333,19 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
 		if (!prRef?.trim()) return null;
 
-		const prNumber = parsePrReference(prRef);
-		if (!prNumber) {
+		const parsedRef = parsePrReference(prRef);
+		if (!parsedRef) {
 			ctx.ui.notify("Invalid PR reference. Enter a number or GitHub PR URL.", "error");
 			return null;
 		}
+		const prLabel = formatPrReference(parsedRef);
 
 		// Get PR info from GitHub
-		ctx.ui.notify(`Fetching PR #${prNumber} info...`, "info");
-		const prInfo = await getPrInfo(pi, prNumber);
+		ctx.ui.notify(`Fetching PR ${prLabel} info...`, "info");
+		const prInfo = await getPrInfo(pi, parsedRef);
 
 		if (!prInfo) {
-			ctx.ui.notify(`Could not find PR #${prNumber}. Make sure gh is authenticated and the PR exists.`, "error");
+			ctx.ui.notify(`Could not find PR ${prLabel}. Make sure gh is authenticated and the PR exists.`, "error");
 			return null;
 		}
 
@@ -1272,19 +1356,20 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		}
 
 		// Checkout the PR
-		ctx.ui.notify(`Checking out PR #${prNumber}...`, "info");
-		const checkoutResult = await checkoutPr(pi, prNumber);
+		ctx.ui.notify(`Checking out PR ${prLabel}...`, "info");
+		const checkoutResult = await checkoutPr(pi, parsedRef);
 
 		if (!checkoutResult.success) {
 			ctx.ui.notify(`Failed to checkout PR: ${checkoutResult.error}`, "error");
 			return null;
 		}
 
-		ctx.ui.notify(`Checked out PR #${prNumber} (${prInfo.headBranch})`, "info");
+		ctx.ui.notify(`Checked out PR ${prLabel} (${prInfo.headBranch})`, "info");
 
 		return {
 			type: "pullRequest",
-			prNumber,
+			prNumber: parsedRef.prNumber,
+			repo: parsedRef.repo,
 			baseBranch: prInfo.baseBranch,
 			title: prInfo.title,
 		};
@@ -1385,7 +1470,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 	 * Parse command arguments for direct invocation
 	 * Returns the target or a special marker for PR that needs async handling
 	 */
-	function parseArgs(args: string | undefined): ReviewTarget | { type: "pr"; ref: string } | null {
+	async function parseArgs(args: string | undefined, cwd: string): Promise<ReviewTarget | { type: "pr"; ref: string } | null> {
 		if (!args?.trim()) return null;
 
 		const parts = args.trim().split(/\s+/);
@@ -1415,7 +1500,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			}
 
 			case "folder": {
-				const paths = parseReviewPaths(parts.slice(1).join(" "));
+				const paths = await parseReviewPaths(parts.slice(1).join(" "), cwd);
 				if (paths.length === 0) return null;
 				return { type: "folder", paths };
 			}
@@ -1441,35 +1526,37 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			return null;
 		}
 
-		const prNumber = parsePrReference(ref);
-		if (!prNumber) {
+		const parsedRef = parsePrReference(ref);
+		if (!parsedRef) {
 			ctx.ui.notify("Invalid PR reference. Enter a number or GitHub PR URL.", "error");
 			return null;
 		}
+		const prLabel = formatPrReference(parsedRef);
 
 		// Get PR info
-		ctx.ui.notify(`Fetching PR #${prNumber} info...`, "info");
-		const prInfo = await getPrInfo(pi, prNumber);
+		ctx.ui.notify(`Fetching PR ${prLabel} info...`, "info");
+		const prInfo = await getPrInfo(pi, parsedRef);
 
 		if (!prInfo) {
-			ctx.ui.notify(`Could not find PR #${prNumber}. Make sure gh is authenticated and the PR exists.`, "error");
+			ctx.ui.notify(`Could not find PR ${prLabel}. Make sure gh is authenticated and the PR exists.`, "error");
 			return null;
 		}
 
 		// Checkout the PR
-		ctx.ui.notify(`Checking out PR #${prNumber}...`, "info");
-		const checkoutResult = await checkoutPr(pi, prNumber);
+		ctx.ui.notify(`Checking out PR ${prLabel}...`, "info");
+		const checkoutResult = await checkoutPr(pi, parsedRef);
 
 		if (!checkoutResult.success) {
 			ctx.ui.notify(`Failed to checkout PR: ${checkoutResult.error}`, "error");
 			return null;
 		}
 
-		ctx.ui.notify(`Checked out PR #${prNumber} (${prInfo.headBranch})`, "info");
+		ctx.ui.notify(`Checked out PR ${prLabel} (${prInfo.headBranch})`, "info");
 
 		return {
 			type: "pullRequest",
-			prNumber,
+			prNumber: parsedRef.prNumber,
+			repo: parsedRef.repo,
 			baseBranch: prInfo.baseBranch,
 			title: prInfo.title,
 		};
@@ -1629,7 +1716,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			// Try to parse direct arguments
 			let target: ReviewTarget | null = null;
 			let fromSelector = false;
-			const parsed = parseArgs(args);
+			const parsed = await parseArgs(args, ctx.cwd);
 
 			if (parsed) {
 				if (parsed.type === "pr") {

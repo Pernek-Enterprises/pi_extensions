@@ -770,27 +770,36 @@ async function askAi(ctx: Ctx, prompt: string, slug: string): Promise<string | u
 	}
 
 	// Use pi-ai SDK: find a model and call complete()
+	let piAi: typeof import("@mariozechner/pi-ai");
 	try {
-		const piAi = await import("@mariozechner/pi-ai");
-		const { complete: piComplete, getModel: piGetModel } = piAi;
+		piAi = await import("@mariozechner/pi-ai");
+	} catch {
+		// pi-ai not available, fall through to programmatic fallback
+		return undefined;
+	}
+	const { complete: piComplete, getModel: piGetModel } = piAi;
 
-		// Try lightweight models first, then fall back
-		const modelCandidates = [
-			{ provider: "anthropic", name: "claude-haiku-4-5" },
-			{ provider: "google", name: "gemini-2.5-flash" },
-			{ provider: "openai", name: "gpt-4.1-mini" },
-			{ provider: "anthropic", name: "claude-sonnet-4-20250514" },
-		];
+	// Try lightweight models first, then fall back
+	const modelCandidates = [
+		{ provider: "anthropic", name: "claude-haiku-4-5" },
+		{ provider: "google", name: "gemini-2.5-flash" },
+		{ provider: "openai", name: "gpt-4.1-mini" },
+		{ provider: "anthropic", name: "claude-sonnet-4-20250514" },
+	];
 
-		for (const candidate of modelCandidates) {
-			const model = piGetModel(candidate.provider, candidate.name);
-			if (!model) continue;
-			const auth = ctx.modelRegistry?.getApiKeyAndHeaders
-				? await ctx.modelRegistry.getApiKeyAndHeaders(model)
-				: { ok: true as const, apiKey: ctx.modelRegistry?.getApiKey ? await ctx.modelRegistry.getApiKey(model) : undefined };
-			const hasRequestAuth = auth.ok && Boolean(auth.apiKey || (auth.headers && Object.keys(auth.headers).length > 0));
-			if (!hasRequestAuth) continue;
+	for (const candidate of modelCandidates) {
+		const model = piGetModel(candidate.provider, candidate.name);
+		if (!model) continue;
+		const auth = ctx.modelRegistry?.getApiKeyAndHeaders
+			? await ctx.modelRegistry.getApiKeyAndHeaders(model)
+			: { ok: true as const, apiKey: ctx.modelRegistry?.getApiKey ? await ctx.modelRegistry.getApiKey(model) : undefined };
+		if (!auth.ok) {
+			continue;
+		}
+		const hasRequestAuth = Boolean(auth.apiKey || (auth.headers && Object.keys(auth.headers).length > 0));
+		if (!hasRequestAuth) continue;
 
+		try {
 			const response = await piComplete(
 				model,
 				{
@@ -805,9 +814,9 @@ async function askAi(ctx: Ctx, prompt: string, slug: string): Promise<string | u
 				.join("\n");
 
 			if (text.trim()) return text;
+		} catch {
+			// Try the next model if this completion attempt fails.
 		}
-	} catch {
-		// pi-ai not available or AI call failed, fall through to programmatic fallback
 	}
 
 	return undefined;
