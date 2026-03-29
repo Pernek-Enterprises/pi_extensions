@@ -21,6 +21,10 @@ type Ctx = {
 	persistCalls?: Array<{ path: string; content: string; mode?: string }>;
 	artifacts?: Map<string, string>;
 	modelRegistry?: {
+		getApiKeyAndHeaders?: (model: unknown) => Promise<
+			| { ok: true; apiKey?: string; headers?: Record<string, string> }
+			| { ok: false; error: string }
+		>;
 		getApiKey?: (model: unknown) => Promise<string | undefined>;
 	};
 	pi?: {
@@ -781,15 +785,17 @@ async function askAi(ctx: Ctx, prompt: string, slug: string): Promise<string | u
 		for (const candidate of modelCandidates) {
 			const model = piGetModel(candidate.provider, candidate.name);
 			if (!model) continue;
-			const apiKey = ctx.modelRegistry?.getApiKey ? await ctx.modelRegistry.getApiKey(model) : undefined;
-			if (!apiKey) continue;
+			const auth = ctx.modelRegistry?.getApiKeyAndHeaders
+				? await ctx.modelRegistry.getApiKeyAndHeaders(model)
+				: { ok: true as const, apiKey: ctx.modelRegistry?.getApiKey ? await ctx.modelRegistry.getApiKey(model) : undefined };
+			if (!auth.ok || !auth.apiKey) continue;
 
 			const response = await piComplete(
 				model,
 				{
 					messages: [{ role: "user" as const, content: [{ type: "text" as const, text: prompt }], timestamp: Date.now() }],
 				},
-				{ apiKey },
+				{ apiKey: auth.apiKey, headers: auth.headers },
 			);
 
 			const text = response.content

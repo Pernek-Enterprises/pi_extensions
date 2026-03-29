@@ -53,6 +53,11 @@ type EvidenceBundle = {
 	diffPreview?: string;
 };
 
+type RequestAuth = {
+	apiKey: string;
+	headers?: Record<string, string>;
+};
+
 type TriageDecision = {
 	nextState: ImplementPlanLoopNextState;
 	reason: string;
@@ -70,11 +75,22 @@ function notify(ctx: any, message: string, level: "info" | "warning" | "error" =
 	else if (typeof ctx?.pi?.sendMessage === "function") ctx.pi.sendMessage({ content: message, display: true }, { triggerTurn: false });
 }
 
-async function assertModelReady(ctx: ExtensionContext): Promise<string> {
+async function assertModelReady(ctx: ExtensionContext): Promise<RequestAuth> {
 	if (!ctx.model) throw new Error("No active model selected");
-	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-	if (!apiKey) throw new Error("Authenticate the active model first");
-	return apiKey;
+	const model = ctx.model as Model<Api>;
+	const modelRegistry = ctx.modelRegistry as {
+		getApiKeyAndHeaders?: (model: Model<Api>) => Promise<
+			| { ok: true; apiKey?: string; headers?: Record<string, string> }
+			| { ok: false; error: string }
+		>;
+		getApiKey?: (model: Model<Api>) => Promise<string | undefined>;
+	};
+	const auth = modelRegistry.getApiKeyAndHeaders
+		? await modelRegistry.getApiKeyAndHeaders(model)
+		: { ok: true as const, apiKey: modelRegistry.getApiKey ? await modelRegistry.getApiKey(model) : undefined };
+	if (!auth.ok) throw new Error(auth.error);
+	if (!auth.apiKey) throw new Error("Authenticate the active model first");
+	return { apiKey: auth.apiKey, headers: auth.headers };
 }
 
 function extractAssistantTextContent(content: unknown): string {
@@ -247,13 +263,13 @@ async function readFilePreview(filePath: string, maxChars: number): Promise<{ av
 	}
 }
 
-async function callModelJson<T>(ctx: ExtensionContext, apiKey: string, systemPrompt: string, userPrompt: string): Promise<T> {
+async function callModelJson<T>(ctx: ExtensionContext, auth: RequestAuth, systemPrompt: string, userPrompt: string): Promise<T> {
 	const message: UserMessage = {
 		role: "user",
 		content: [{ type: "text", text: userPrompt }],
 		timestamp: Date.now(),
 	};
-	const response = await complete(ctx.model as Model<Api>, { systemPrompt, messages: [message] }, { apiKey });
+	const response = await complete(ctx.model as Model<Api>, { systemPrompt, messages: [message] }, { apiKey: auth.apiKey, headers: auth.headers });
 	if (response.stopReason === "aborted") throw new Error("Model call aborted");
 	if (response.stopReason === "error") throw new Error("Model call failed");
 	const text = response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n");
@@ -267,7 +283,11 @@ async function callModelJson<T>(ctx: ExtensionContext, apiKey: string, systemPro
 		text,
 	].join("\n\n");
 	const repairMessage: UserMessage = { role: "user", content: [{ type: "text", text: repairPrompt }], timestamp: Date.now() };
-	const repaired = await complete(ctx.model as Model<Api>, { systemPrompt: "You repair malformed JSON model outputs. Return strict JSON only.", messages: [repairMessage] }, { apiKey });
+	const repaired = await complete(
+		ctx.model as Model<Api>,
+		{ systemPrompt: "You repair malformed JSON model outputs. Return strict JSON only.", messages: [repairMessage] },
+		{ apiKey: auth.apiKey, headers: auth.headers },
+	);
 	if (repaired.stopReason === "aborted") throw new Error("Model call aborted during JSON repair");
 	if (repaired.stopReason === "error") throw new Error("Model call failed during JSON repair");
 	const repairedText = repaired.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n");
@@ -328,7 +348,7 @@ function normalizeReview(review: ImplementationReviewResult): ImplementationRevi
 	};
 }
 
-async function reviewImplementation(ctx: ExtensionContext, apiKey: string, input: {
+async function reviewImplementation(ctx: ExtensionContext, auth: RequestAuth, input: {
 	contract: ExecutionContract;
 	repoContext: string;
 	implementationSummary: string;
@@ -340,7 +360,7 @@ async function reviewImplementation(ctx: ExtensionContext, apiKey: string, input
 }): Promise<ImplementationReviewResult> {
 	const review = await callModelJson<ImplementationReviewResult>(
 		ctx,
-		apiKey,
+		auth,
 		buildReviewSystemPrompt(),
 		buildReviewUserPrompt(input),
 	);
@@ -629,9 +649,9 @@ export default function implementPlanLoopExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			let apiKey: string;
+			let auth: RequestAuth;
 			try {
-				apiKey = await assertModelReady(ctx);
+				auth = await assertModelReady(ctx);
 			} catch (error) {
 				await applyImplementLoopState({ ...ctx, pi }, {
 					...state,
@@ -790,7 +810,7 @@ export default function implementPlanLoopExtension(pi: ExtensionAPI) {
 							: "Reviewing the latest repository state against the execution contract.",
 				});
 				notify(ctx, `implement-plan-loop round ${iteration}: reviewing implementation against the contract...`, "info");
-				const review = await reviewImplementation(ctx, apiKey, {
+				const review = await reviewImplementation(ctx, auth, {
 					contract: loaded.contract,
 					repoContext,
 					implementationSummary,

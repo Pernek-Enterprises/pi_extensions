@@ -14,7 +14,7 @@ type CompleteResponse = {
 type CompleteFn = (
 	model: unknown,
 	input: { systemPrompt?: string; messages: UserMessage[] },
-	options?: { apiKey?: string; signal?: AbortSignal },
+	options?: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal },
 ) => Promise<CompleteResponse>;
 
 let runtimeCompletePromise: Promise<CompleteFn | null> | undefined;
@@ -31,7 +31,7 @@ async function loadComplete(): Promise<CompleteFn | null> {
 export async function complete(
 	model: unknown,
 	input: { systemPrompt?: string; messages: UserMessage[] },
-	options?: { apiKey?: string; signal?: AbortSignal },
+	options?: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal },
 ): Promise<CompleteResponse> {
 	const runtimeComplete = await loadComplete();
 	if (!runtimeComplete) {
