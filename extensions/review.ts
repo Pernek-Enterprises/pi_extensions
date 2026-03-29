@@ -1547,9 +1547,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					return;
 				}
 
+				if (pass === REVIEW_LOOP_MAX_ITERATIONS) {
+					break;
+				}
+
 				ctx.ui.notify(`Loop fixing pass ${pass}: found blocking findings, returning to fix them...`, "info");
 
-				const fixBaselineAssistantId = getLastAssistantSnapshot(ctx)?.id;
 				const sentFixPrompt = await executeEndReviewAction(ctx, "returnAndFix", {
 					showSummaryLoader: true,
 					notifySuccess: false,
@@ -1558,6 +1561,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					return;
 				}
 
+				const fixBaselineAssistantId = getLastAssistantSnapshot(ctx)?.id;
 				const fixTurnStarted = await waitForLoopTurnToStart(ctx, fixBaselineAssistantId);
 				if (!fixTurnStarted) {
 					ctx.ui.notify("Loop fixing stopped: fix pass did not start in time.", "error");
@@ -1586,7 +1590,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(
-				`Loop fixing stopped after ${REVIEW_LOOP_MAX_ITERATIONS} passes (safety limit reached).`,
+				`Loop fixing stopped after ${REVIEW_LOOP_MAX_ITERATIONS} passes (safety limit reached; blocking findings may remain).`,
 				"warning",
 			);
 		} finally {
@@ -1779,7 +1783,6 @@ Instructions:
 		if (showLoader && ctx.hasUI) {
 			return ctx.ui.custom<{ cancelled: boolean; error?: string } | null>((tui, theme, _kb, done) => {
 				const loader = new BorderedLoader(tui, theme, "Returning and summarizing review branch...");
-				loader.onAbort = () => done(null);
 
 				ctx.navigateTree(originId, {
 					summarize: true,

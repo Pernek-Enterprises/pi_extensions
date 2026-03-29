@@ -22,9 +22,38 @@ const sanitizeOscField = (value: string): string =>
 		.trim();
 
 /**
+ * Detect whether the current runtime can safely emit OSC 777 notifications.
+ */
+const supportsOsc777 = (): boolean => {
+	if (!process.stdout.isTTY) {
+		return false;
+	}
+
+	const term = process.env.TERM?.toLowerCase();
+	if (term === "dumb") {
+		return false;
+	}
+
+	const termProgram = process.env.TERM_PROGRAM?.toLowerCase();
+	return (
+		termProgram === "ghostty" ||
+		termProgram === "iterm.app" ||
+		termProgram === "wezterm" ||
+		Boolean(process.env.GHOSTTY_RESOURCES_DIR) ||
+		term?.includes("ghostty") === true ||
+		term?.includes("rxvt") === true ||
+		term?.includes("urxvt") === true
+	);
+};
+
+/**
  * Send a desktop notification via OSC 777 escape sequence.
  */
 const notify = (title: string, body: string): void => {
+	if (!supportsOsc777()) {
+		return;
+	}
+
 	const safeTitle = sanitizeOscField(title);
 	const safeBody = sanitizeOscField(body);
 	// OSC 777 format: ESC ] 777 ; notify ; title ; body BEL
