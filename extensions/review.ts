@@ -1231,7 +1231,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		let quote: '"' | "'" | null = null;
 		let escaping = false;
 
-		for (const char of line) {
+		for (let index = 0; index < line.length; index += 1) {
+			const char = line[index];
+			const nextChar = line[index + 1];
 			if (escaping) {
 				current += char;
 				escaping = false;
@@ -1244,7 +1246,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					continue;
 				}
 				if (char === "\\") {
-					escaping = true;
+					if (nextChar === quote || nextChar === "\\") {
+						escaping = true;
+						continue;
+					}
+					current += char;
 					continue;
 				}
 				current += char;
@@ -1263,7 +1269,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
 				continue;
 			}
 			if (char === "\\") {
-				escaping = true;
+				if (nextChar === '"' || nextChar === "\\") {
+					escaping = true;
+					continue;
+				}
+				current += char;
 				continue;
 			}
 			current += char;
@@ -1542,6 +1552,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
 			return null;
 		}
 
+		if (await hasPendingChanges(pi)) {
+			ctx.ui.notify("Cannot checkout PR: you have uncommitted changes. Please commit or stash them first.", "error");
+			return null;
+		}
+
 		// Checkout the PR
 		ctx.ui.notify(`Checking out PR ${prLabel}...`, "info");
 		const checkoutResult = await checkoutPr(pi, parsedRef);
@@ -1563,11 +1578,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 	}
 
 	function isLoopCompatibleTarget(target: ReviewTarget): boolean {
-		if (target.type !== "commit") {
-			return true;
-		}
-
-		return false;
+		return target.type !== "commit";
 	}
 
 	async function runLoopFixingReview(ctx: ExtensionCommandContext, target: ReviewTarget): Promise<void> {
@@ -1869,7 +1880,9 @@ Instructions:
 	): Promise<{ cancelled: boolean; error?: string } | null> {
 		if (showLoader && ctx.hasUI) {
 			return ctx.ui.custom<{ cancelled: boolean; error?: string } | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, "Returning and summarizing review branch...");
+				const loader = new BorderedLoader(tui, theme, "Returning and summarizing review branch...", {
+					cancellable: false,
+				});
 
 				ctx.navigateTree(originId, {
 					summarize: true,
