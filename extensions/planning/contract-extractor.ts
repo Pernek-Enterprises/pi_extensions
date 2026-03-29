@@ -84,8 +84,20 @@ export async function extractExecutionContract(ctx: ExtensionContext, input: {
 	signal?: AbortSignal;
 }): Promise<ExecutionContract | null> {
 	if (!ctx.model) throw new Error("No active model selected");
-	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-	if (!apiKey) throw new Error("Authenticate the active model first");
+	const model = ctx.model as Model<Api>;
+	const modelRegistry = ctx.modelRegistry as {
+		getApiKeyAndHeaders?: (model: Model<Api>) => Promise<
+			| { ok: true; apiKey?: string; headers?: Record<string, string> }
+			| { ok: false; error: string }
+		>;
+		getApiKey?: (model: Model<Api>) => Promise<string | undefined>;
+	};
+	const auth = modelRegistry.getApiKeyAndHeaders
+		? await modelRegistry.getApiKeyAndHeaders(model)
+		: { ok: true as const, apiKey: modelRegistry.getApiKey ? await modelRegistry.getApiKey(model) : undefined };
+	if (!auth.ok) throw new Error(auth.error);
+	const hasRequestAuth = Boolean(auth.apiKey || (auth.headers && Object.keys(auth.headers).length > 0));
+	if (!hasRequestAuth) throw new Error("Authenticate the active model first");
 
 	const files = (input.relevantFiles ?? []).map((file) => `- ${file.path}${file.reason ? ` — ${file.reason}` : ""}`).join("\n");
 	const prompt = [
@@ -103,9 +115,9 @@ export async function extractExecutionContract(ctx: ExtensionContext, input: {
 	};
 
 	const response = await complete(
-		ctx.model as Model<Api>,
+		model,
 		{ systemPrompt: EXTRACTION_SYSTEM_PROMPT, messages: [message] },
-		{ apiKey, signal: input.signal },
+		{ apiKey: auth.apiKey, headers: auth.headers, signal: input.signal },
 	);
 	if (response.stopReason === "aborted" || response.stopReason === "error") return null;
 	const text = response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n");
