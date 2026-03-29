@@ -24,6 +24,15 @@
  *   its contents are appended to the review prompt.
  *
  * Note: PR review requires a clean working tree (no uncommitted changes to tracked files).
+ *
+ * Maintainer notes:
+ * - Entrypoint: `reviewExtension`
+ * - Commands: `/review`, `/end-review`
+ * - Review modes: uncommitted, branch, commit, PR, folder, custom instructions
+ * - Loop fixing: optional iterative fix/re-review flow persisted in review settings
+ * - UI: interactive TUI is used for selectors/loaders; headless mode supports command execution only
+ * - External tools: `git` required, `gh` required for PR-oriented flows
+ * - State persistence: `REVIEW_STATE_TYPE` and `REVIEW_SETTINGS_TYPE` custom session entries
  */
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";

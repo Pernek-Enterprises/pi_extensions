@@ -764,6 +764,7 @@ async function garbageCollectTodos(todosDir: string, settings: TodoSettings): Pr
 			.map(async (entry) => {
 				const id = entry.slice(0, -3);
 				const filePath = path.join(todosDir, entry);
+				const lockPath = getLockPath(todosDir, id);
 				try {
 					const content = await fs.readFile(filePath, "utf8");
 					const { frontMatter } = splitFrontMatter(content);
@@ -772,7 +773,10 @@ async function garbageCollectTodos(todosDir: string, settings: TodoSettings): Pr
 					const createdAt = Date.parse(parsed.created_at);
 					if (!Number.isFinite(createdAt)) return;
 					if (createdAt < cutoff) {
-						await fs.unlink(filePath);
+						const hasLock = await fs.access(lockPath).then(() => true).catch(() => false);
+						if (!hasLock) {
+							await fs.unlink(filePath);
+						}
 					}
 				} catch {
 					// ignore unreadable todo
@@ -966,9 +970,18 @@ async function acquireLock(
 			await handle.close();
 			return async () => {
 				try {
+					const currentLock = await readLockInfo(lockPath);
+					if (!currentLock) return;
+					const isOwner =
+						currentLock.id === info.id &&
+						currentLock.pid === info.pid &&
+						currentLock.session === info.session &&
+						currentLock.created_at === info.created_at;
+					if (!isOwner) return;
 					await fs.unlink(lockPath);
-				} catch {
-					// ignore
+				} catch (error: any) {
+					if (error?.code === "ENOENT") return;
+					// ignore cleanup failures to keep lock release safe
 				}
 			};
 		} catch (error: any) {
@@ -1260,8 +1273,12 @@ function appendExpandHint(theme: Theme, text: string): string {
 }
 
 async function ensureTodoExists(filePath: string, id: string): Promise<TodoRecord | null> {
-	if (!existsSync(filePath)) return null;
-	return readTodoFile(filePath, id);
+	try {
+		return await readTodoFile(filePath, id);
+	} catch (error: any) {
+		if (error?.code === "ENOENT") return null;
+		throw error;
+	}
 }
 
 async function appendTodoBody(filePath: string, todo: TodoRecord, text: string): Promise<TodoRecord> {
@@ -1806,7 +1823,8 @@ export default function todosExtension(pi: ExtensionAPI) {
 			const searchTerm = (args ?? "").trim();
 
 			if (!ctx.hasUI) {
-				const text = formatTodoList(todos);
+				const filteredTodos = searchTerm ? filterTodos(todos, searchTerm) : todos;
+				const text = formatTodoList(filteredTodos);
 				console.log(text);
 				return;
 			}
@@ -1925,7 +1943,19 @@ export default function todosExtension(pi: ExtensionAPI) {
 					}
 
 					if (action === "release") {
-						const result = await releaseTodoAssignment(todosDir, record.id, ctx, true);
+						const assignedSessionId = record.assigned_to_session;
+						const currentSessionId = ctx.sessionManager.getSessionId();
+						let forceRelease = false;
+						if (assignedSessionId && assignedSessionId !== currentSessionId) {
+							forceRelease = await ctx.ui.confirm(
+								"Release assigned todo?",
+								`Todo ${formatTodoId(record.id)} is assigned to session ${assignedSessionId}. Force release it?`,
+							);
+							if (!forceRelease) {
+								return "stay";
+							}
+						}
+						const result = await releaseTodoAssignment(todosDir, record.id, ctx, forceRelease);
 						if ("error" in result) {
 							ctx.ui.notify(result.error, "error");
 							return "stay";

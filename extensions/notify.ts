@@ -12,11 +12,23 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Markdown, type MarkdownTheme } from "@mariozechner/pi-tui";
 
 /**
+ * Sanitize OSC notification fields to avoid control-sequence injection.
+ */
+const sanitizeOscField = (value: string): string =>
+	value
+		.replace(/[\x00-\x1f\x7f]/g, " ")
+		.replace(/[;]+/g, ",")
+		.replace(/\s+/g, " ")
+		.trim();
+
+/**
  * Send a desktop notification via OSC 777 escape sequence.
  */
 const notify = (title: string, body: string): void => {
+	const safeTitle = sanitizeOscField(title);
+	const safeBody = sanitizeOscField(body);
 	// OSC 777 format: ESC ] 777 ; notify ; title ; body BEL
-	process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+	process.stdout.write(`\x1b]777;notify;${safeTitle};${safeBody}\x07`);
 };
 
 const isTextPart = (part: unknown): part is { type: "text"; text: string } =>
@@ -31,15 +43,16 @@ const extractLastAssistantText = (messages: Array<{ role?: string; content?: unk
 
 		const content = message.content;
 		if (typeof content === "string") {
-			return content.trim() || null;
+			const text = content.trim();
+			if (text) return text;
+			continue;
 		}
 
 		if (Array.isArray(content)) {
 			const text = content.filter(isTextPart).map((part) => part.text).join("\n").trim();
-			return text || null;
+			if (text) return text;
+			continue;
 		}
-
-		return null;
 	}
 
 	return null;

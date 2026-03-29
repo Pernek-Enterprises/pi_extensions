@@ -73,7 +73,17 @@ const HAIKU_MODEL_ID = "claude-haiku-4-5";
 type ModelAuth = {
 	apiKey?: string;
 	headers?: Record<string, string>;
+	error?: string;
 };
+
+type ExtractionRunResult =
+	| { status: "success"; result: ExtractionResult | null }
+	| { status: "cancelled" }
+	| { status: "error"; error: string };
+
+function hasUsableModelAuth(auth: ModelAuth): boolean {
+	return Boolean(auth.apiKey || (auth.headers && Object.keys(auth.headers).length > 0));
+}
 
 async function resolveModelAuth(
 	modelRegistry: {
@@ -88,7 +98,7 @@ async function resolveModelAuth(
 	if (modelRegistry.getApiKeyAndHeaders) {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
-			return {};
+			return { error: auth.error };
 		}
 		return { apiKey: auth.apiKey, headers: auth.headers };
 	}
@@ -113,7 +123,7 @@ async function selectExtractionModel(
 	const codexModel = modelRegistry.find("openai-codex", CODEX_MODEL_ID);
 	if (codexModel) {
 		const auth = await resolveModelAuth(modelRegistry, codexModel);
-		if (auth.apiKey) {
+		if (hasUsableModelAuth(auth)) {
 			return codexModel;
 		}
 	}
@@ -124,7 +134,7 @@ async function selectExtractionModel(
 	}
 
 	const auth = await resolveModelAuth(modelRegistry, haikuModel);
-	if (!auth.apiKey) {
+	if (!hasUsableModelAuth(auth)) {
 		return currentModel;
 	}
 
@@ -482,14 +492,20 @@ export default function (pi: ExtensionAPI) {
 			const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
 
 			// Run extraction with loader UI
-			const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
+			const extractionRun = await ctx.ui.custom<ExtractionRunResult>((tui, theme, _kb, done) => {
 				const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
-				loader.onAbort = () => done(null);
+				let settled = false;
+				const finish = (result: ExtractionRunResult) => {
+					if (settled) return;
+					settled = true;
+					done(result);
+				};
+				loader.onAbort = () => finish({ status: "cancelled" });
 
-				const doExtract = async () => {
+				const doExtract = async (): Promise<ExtractionResult | null> => {
 					const auth = await resolveModelAuth(ctx.modelRegistry, extractionModel);
-					if (!auth.apiKey) {
-						throw new Error(`No API key for ${extractionModel.provider}/${extractionModel.id}`);
+					if (!hasUsableModelAuth(auth)) {
+						throw new Error(auth.error ?? `No request auth for ${extractionModel.provider}/${extractionModel.id}`);
 					}
 					const userMessage: UserMessage = {
 						role: "user",
@@ -506,22 +522,46 @@ export default function (pi: ExtensionAPI) {
 					if (response.stopReason === "aborted") {
 						return null;
 					}
+					if (response.stopReason === "error") {
+						throw new Error("Question extraction failed.");
+					}
 
 					const responseText = response.content
 						.filter((c): c is { type: "text"; text: string } => c.type === "text")
 						.map((c) => c.text)
 						.join("\n");
 
-					return parseExtractionResult(responseText);
+					const parsed = parseExtractionResult(responseText);
+					if (!parsed) {
+						throw new Error("Question extraction returned invalid JSON.");
+					}
+
+					return parsed;
 				};
 
 				doExtract()
-					.then(done)
-					.catch(() => done(null));
+					.then((result) => finish({ status: "success", result }))
+					.catch((error) =>
+						finish({
+							status: "error",
+							error: error instanceof Error ? error.message : String(error),
+						}),
+					);
 
 				return loader;
 			});
 
+			if (extractionRun.status === "cancelled") {
+				ctx.ui.notify("Cancelled", "info");
+				return;
+			}
+
+			if (extractionRun.status === "error") {
+				ctx.ui.notify(extractionRun.error, "error");
+				return;
+			}
+
+			const extractionResult = extractionRun.result;
 			if (extractionResult === null) {
 				ctx.ui.notify("Cancelled", "info");
 				return;

@@ -96,7 +96,8 @@ export async function extractExecutionContract(ctx: ExtensionContext, input: {
 		? await modelRegistry.getApiKeyAndHeaders(model)
 		: { ok: true as const, apiKey: modelRegistry.getApiKey ? await modelRegistry.getApiKey(model) : undefined };
 	if (!auth.ok) throw new Error(auth.error);
-	if (!auth.apiKey) throw new Error("Authenticate the active model first");
+	const hasRequestAuth = Boolean(auth.apiKey || (auth.headers && Object.keys(auth.headers).length > 0));
+	if (!hasRequestAuth) throw new Error("Authenticate the active model first");
 
 	const files = (input.relevantFiles ?? []).map((file) => `- ${file.path}${file.reason ? ` — ${file.reason}` : ""}`).join("\n");
 	const prompt = [

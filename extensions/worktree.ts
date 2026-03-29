@@ -788,7 +788,8 @@ async function askAi(ctx: Ctx, prompt: string, slug: string): Promise<string | u
 			const auth = ctx.modelRegistry?.getApiKeyAndHeaders
 				? await ctx.modelRegistry.getApiKeyAndHeaders(model)
 				: { ok: true as const, apiKey: ctx.modelRegistry?.getApiKey ? await ctx.modelRegistry.getApiKey(model) : undefined };
-			if (!auth.ok || !auth.apiKey) continue;
+			const hasRequestAuth = auth.ok && Boolean(auth.apiKey || (auth.headers && Object.keys(auth.headers).length > 0));
+			if (!hasRequestAuth) continue;
 
 			const response = await piComplete(
 				model,

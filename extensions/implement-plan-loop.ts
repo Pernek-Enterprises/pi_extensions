@@ -54,7 +54,7 @@ type EvidenceBundle = {
 };
 
 type RequestAuth = {
-	apiKey: string;
+	apiKey?: string;
 	headers?: Record<string, string>;
 };
 
@@ -89,7 +89,8 @@ async function assertModelReady(ctx: ExtensionContext): Promise<RequestAuth> {
 		? await modelRegistry.getApiKeyAndHeaders(model)
 		: { ok: true as const, apiKey: modelRegistry.getApiKey ? await modelRegistry.getApiKey(model) : undefined };
 	if (!auth.ok) throw new Error(auth.error);
-	if (!auth.apiKey) throw new Error("Authenticate the active model first");
+	const hasRequestAuth = Boolean(auth.apiKey || (auth.headers && Object.keys(auth.headers).length > 0));
+	if (!hasRequestAuth) throw new Error("Authenticate the active model first");
 	return { apiKey: auth.apiKey, headers: auth.headers };
 }
 
