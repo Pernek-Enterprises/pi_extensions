@@ -424,6 +424,43 @@ test("worktree-pr retrieves the git diff before building the PR description", as
 	}
 });
 
+test("worktree-pr fails clearly when git push fails and records the failing phase", async () => {
+	const ctx = makeCtx({
+		execResponses: baseExecResponses({
+			"git diff": { stdout: "diff --git a/src/file.ts b/src/file.ts\n", stderr: "", code: 0 },
+			"git push": { stdout: "", stderr: "remote rejected", code: 1 },
+		}),
+	});
+
+	const handler = getPrHandler(worktreeExtension);
+	await assert.rejects(() => handler(ctx), /worktree-pr failed during push: .*remote rejected/i);
+	assert.ok(!ctx.notices.some((notice) => /PR ready:/i.test(notice.message)), "must not report PR ready on push failure");
+	assert.ok(ctx.notices.some((notice) => /push/i.test(notice.message) && /remote rejected/i.test(notice.message)));
+
+	const metadata = JSON.parse(ctx.artifacts.get(`.pi/worktrees/${TEST_SLUG}.json`) ?? "{}");
+	assert.equal(metadata.lastFailure?.phase, "push");
+	assert.match(String(metadata.lastFailure?.reason ?? ""), /remote rejected/i);
+	assert.ok(ctx.artifacts.get(`.pi/worktrees/history.jsonl`)?.includes('"type":"worktree-pr-failed"'));
+});
+
+test("worktree-pr fails clearly when gh pr create returns no URL instead of reporting empty success", async () => {
+	const ctx = makeCtx({
+		execResponses: baseExecResponses({
+			"git diff": { stdout: "diff --git a/src/file.ts b/src/file.ts\n", stderr: "", code: 0 },
+			"gh pr create": { stdout: "", stderr: "", code: 0 },
+		}),
+	});
+
+	const handler = getPrHandler(worktreeExtension);
+	await assert.rejects(() => handler(ctx), /worktree-pr failed during pr: .*did not return a PR URL/i);
+	assert.ok(!ctx.notices.some((notice) => /^PR ready:\s*$/i.test(notice.message)), "must not emit an empty PR ready message");
+	assert.ok(ctx.notices.some((notice) => /did not return a PR URL/i.test(notice.message)));
+
+	const metadata = JSON.parse(ctx.artifacts.get(`.pi/worktrees/${TEST_SLUG}.json`) ?? "{}");
+	assert.equal(metadata.lastFailure?.phase, "pr");
+	assert.match(String(metadata.lastFailure?.reason ?? ""), /did not return a PR URL/i);
+});
+
 // ---------- Scope: extensions/worktree.ts is the module being updated ----------
 
 test("worktree extension module (extensions/worktree.ts) is the updated module that contains PR description logic", async () => {
