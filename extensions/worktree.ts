@@ -741,6 +741,11 @@ function parseGeneratedTexts(response: string | undefined, slug: string): { comm
 	};
 }
 
+function formatCommandFailure(command: string, result: ExecResult): string {
+	const detail = trimOutput(result.stderr) || trimOutput(result.stdout);
+	return detail ? `${command} failed: ${detail}` : `${command} failed with code ${result.code}`;
+}
+
 async function ensureGhAuthenticated(ctx: Ctx, cwd: string): Promise<void> {
 	try {
 		const result = await runInCwd(ctx, cwd, "gh auth status");
@@ -874,11 +879,15 @@ async function runPrWorkflow(ctx: Ctx, progress?: ProgressLoader): Promise<Workt
 		await ensureGhAuthenticated(ctx, cwd);
 
 		// Get full diff against main for comprehensive PR description
+		phase = "analyze";
 		progress?.setMessage("Analyzing changes…");
 		const fullDiffResult = await runInCwd(ctx, cwd, "git diff main");
+		if (fullDiffResult.code !== 0) fail(ctx, `worktree-pr failed during ${phase}: ${formatCommandFailure("git diff main", fullDiffResult)}`);
 		const fullDiff = trimOutput(fullDiffResult.stdout);
 
+		phase = "status";
 		const status = await runInCwd(ctx, cwd, "git status --short");
+		if (status.code !== 0) fail(ctx, `worktree-pr failed during ${phase}: ${formatCommandFailure("git status --short", status)}`);
 		const hasChanges = trimOutput(status.stdout).length > 0;
 
 		phase = "commit";
@@ -887,29 +896,39 @@ async function runPrWorkflow(ctx: Ctx, progress?: ProgressLoader): Promise<Workt
 
 		let commitStatus = "skipped-clean";
 		if (hasChanges) {
+			phase = "stage";
 			info(ctx, `Creating commit for ${branch}...`);
-			await runInCwd(ctx, cwd, "git add -A");
-			await runInCwd(ctx, cwd, `git commit -m ${shQuote(generatedTexts.commitMessage)}`);
+			const addResult = await runInCwd(ctx, cwd, "git add -A");
+			if (addResult.code !== 0) fail(ctx, `worktree-pr failed during ${phase}: ${formatCommandFailure("git add -A", addResult)}`);
+
+			phase = "commit";
+			const commitResult = await runInCwd(ctx, cwd, `git commit -m ${shQuote(generatedTexts.commitMessage)}`);
+			if (commitResult.code !== 0) fail(ctx, `worktree-pr failed during ${phase}: ${formatCommandFailure("git commit", commitResult)}`);
 			commitStatus = "created";
 		}
 
 		phase = "push";
 		progress?.setMessage(`Pushing ${branch}…`);
 		info(ctx, `Pushing ${branch}...`);
-		await runInCwd(ctx, cwd, `git push -u origin ${branch}`);
+		const pushResult = await runInCwd(ctx, cwd, `git push -u origin ${branch}`);
+		if (pushResult.code !== 0) fail(ctx, `worktree-pr failed during ${phase}: ${formatCommandFailure(`git push -u origin ${branch}`, pushResult)}`);
 		const pushStatus = "pushed";
 
 		phase = "pr";
 		progress?.setMessage("Creating pull request…");
 		info(ctx, `Preparing PR for ${branch}...`);
 		const existingPrUrl = await lookupExistingPr(ctx, cwd, branch);
-		const prUrl = existingPrUrl
-			? existingPrUrl
-			: trimOutput((await runInCwd(
+		let prUrl = existingPrUrl;
+		if (!prUrl) {
+			const prCreateResult = await runInCwd(
 				ctx,
 				cwd,
 				`gh pr create --base main --head ${shQuote(branch)} --title ${shQuote(generatedTexts.prTitle)} --body ${shQuote(generatedTexts.prBody)}`,
-			)).stdout);
+			);
+			if (prCreateResult.code !== 0) fail(ctx, `worktree-pr failed during ${phase}: ${formatCommandFailure("gh pr create", prCreateResult)}`);
+			prUrl = trimOutput(prCreateResult.stdout);
+			if (!prUrl) fail(ctx, `worktree-pr failed during ${phase}: gh pr create succeeded but did not return a PR URL.`);
+		}
 		const prStatus = existingPrUrl ? "existing" : "created";
 
 		const nextMetadata: WorktreeMetadata = {
@@ -934,9 +953,12 @@ async function runPrWorkflow(ctx: Ctx, progress?: ProgressLoader): Promise<Workt
 		info(ctx, `PR ready: ${prUrl}`);
 		return nextMetadata;
 	} catch (error) {
-		const reason = (error as Error).message || "Unknown worktree-pr failure";
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		const reason = errorMessage.startsWith("worktree-pr failed during ")
+			? errorMessage
+			: `worktree-pr failed during ${phase}: ${errorMessage || "Unknown worktree-pr failure"}`;
 		await recordFailure(ctx, { command: "worktree-pr", phase, reason }, metadata, { cwd, branch: branch || undefined });
-		throw error;
+		throw new Error(reason);
 	}
 }
 
