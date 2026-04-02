@@ -84,6 +84,103 @@ async function getCurrentBranch(ctx: Ctx): Promise<string> {
 	return result.stdout.trim();
 }
 
+async function getConfiguredRemoteForBranch(branch: string): Promise<string | undefined> {
+	const result = await exec(`git config --get ${shQuote(`branch.${branch}.remote`)}`);
+	const remote = result.stdout.trim();
+	if (result.code === 0 && remote) return remote;
+	return undefined;
+}
+
+async function getRemotes(): Promise<string[]> {
+	const result = await exec("git remote");
+	if (result.code !== 0) return [];
+	return result.stdout
+		.split("\n")
+		.map((value) => value.trim())
+		.filter(Boolean);
+}
+
+async function getConfiguredPushDefaultRemote(): Promise<string | undefined> {
+	const result = await exec(`git config --get ${shQuote("remote.pushDefault")}`);
+	const remote = result.stdout.trim();
+	if (result.code === 0 && remote) return remote;
+	return undefined;
+}
+
+async function resolveRemote(...branches: Array<string | undefined>): Promise<string | undefined> {
+	for (const branch of branches) {
+		if (!branch) continue;
+		const remote = await getConfiguredRemoteForBranch(branch);
+		if (remote) return remote;
+	}
+
+	const remotes = await getRemotes();
+	if (remotes.length === 1) return remotes[0];
+	return undefined;
+}
+
+async function resolvePushRemote(ctx: Ctx, branch: string): Promise<string | undefined> {
+	const configuredRemote = await getConfiguredRemoteForBranch(branch);
+	if (configuredRemote) return configuredRemote;
+
+	const pushDefaultRemote = await getConfiguredPushDefaultRemote();
+	if (pushDefaultRemote) return pushDefaultRemote;
+
+	const remotes = await getRemotes();
+	if (remotes.length === 1) return remotes[0];
+	if (remotes.includes("origin")) return "origin";
+	if (remotes.length > 1) {
+		return await ctx.ui.select(`Select remote to push '${branch}' to:`, remotes);
+	}
+	return undefined;
+}
+
+type CheckoutChoice = {
+	label: string;
+	checkoutTarget: string;
+	shortName: string;
+	isRemote: boolean;
+	canTrack: boolean;
+};
+
+function buildCheckoutChoices(rawBranches: string[]): CheckoutChoice[] {
+	const localBranches = new Set(rawBranches.filter((branch) => branch && !branch.startsWith("remotes/")));
+	const seen = new Set<string>();
+	const choices: CheckoutChoice[] = [];
+
+	for (const rawBranch of rawBranches) {
+		if (rawBranch.startsWith("remotes/")) {
+			const match = rawBranch.match(/^remotes\/([^/]+)\/(.+)$/);
+			if (!match) continue;
+
+			const [, remote, shortName] = match;
+			const label = `${remote}/${shortName}`;
+			if (seen.has(label)) continue;
+			seen.add(label);
+			choices.push({
+				label,
+				checkoutTarget: `${remote}/${shortName}`,
+				shortName,
+				isRemote: true,
+				canTrack: !localBranches.has(shortName),
+			});
+			continue;
+		}
+
+		if (seen.has(rawBranch)) continue;
+		seen.add(rawBranch);
+		choices.push({
+			label: rawBranch,
+			checkoutTarget: rawBranch,
+			shortName: rawBranch,
+			isRemote: false,
+			canTrack: false,
+		});
+	}
+
+	return choices;
+}
+
 // --- Command handlers ---
 
 async function gitStatus(ctx: Ctx) {
@@ -105,6 +202,7 @@ async function gitCheckout(ctx: Ctx, branchArg?: string) {
 	const branch = branchArg ? String(branchArg) : undefined;
 
 	let targetBranch: string;
+	let trackRemoteBranch = false;
 
 	if (!branch) {
 		// Interactive branch picker
@@ -112,27 +210,27 @@ async function gitCheckout(ctx: Ctx, branchArg?: string) {
 		const rawBranches = branchResult.stdout
 			.split("\n")
 			.map((b) => b.replace(/^\*?\s+/, "").trim())
-			.filter(Boolean);
+			.filter((b) => Boolean(b) && !b.includes(" -> "));
 
-		// Strip remotes/origin/ prefixes and deduplicate
-		const seen = new Set<string>();
-		const choices: string[] = [];
-		for (const raw of rawBranches) {
-			const cleaned = raw.replace(/^remotes\/origin\//, "");
-			if (!seen.has(cleaned)) {
-				seen.add(cleaned);
-				choices.push(cleaned);
-			}
+		const choices = buildCheckoutChoices(rawBranches);
+		const selectedLabel = await ctx.ui.select("Select branch to checkout:", choices.map((choice) => choice.label));
+		const selectedChoice = choices.find((choice) => choice.label === selectedLabel) ?? choices[0];
+		if (!selectedChoice) {
+			warnMsg(ctx, "No branches available to checkout.");
+			return;
 		}
 
-		targetBranch = await ctx.ui.select("Select branch to checkout:", choices);
+		targetBranch = selectedChoice.checkoutTarget;
+		trackRemoteBranch = selectedChoice.isRemote && selectedChoice.canTrack;
 	} else {
 		targetBranch = branch;
 	}
 
 	const stashed = await handleDirtyTree(ctx);
-
-	const result = await exec(`git checkout ${shQuote(targetBranch)}`);
+	const checkoutCommand = trackRemoteBranch
+		? `git checkout --track ${shQuote(targetBranch)}`
+		: `git checkout ${shQuote(targetBranch)}`;
+	const result = await exec(checkoutCommand);
 	if (result.code !== 0) {
 		errorMsg(ctx, `Checkout failed: ${result.stderr}`);
 		if (stashed) await unstash(ctx);
@@ -175,11 +273,18 @@ async function gitRemoteMain(ctx: Ctx) {
 		}
 	}
 
-	const pullResult = await exec("git pull origin main");
+	const remote = await resolveRemote("main", currentBranch);
+	if (!remote) {
+		errorMsg(ctx, "Failed to determine which remote should be used for main. Configure branch.main.remote or ensure the repo has exactly one remote.");
+		if (stashed) await unstash(ctx);
+		return;
+	}
+
+	const pullResult = await exec(`git pull ${shQuote(remote)} main`);
 	if (pullResult.code !== 0) {
 		errorMsg(ctx, `Failed to pull: ${pullResult.stderr}`);
 	} else {
-		notify(ctx, pullResult.stdout.trim() || "Pulled latest from origin/main");
+		notify(ctx, pullResult.stdout.trim() || `Pulled latest from ${remote}/main`);
 	}
 
 	if (stashed) {
@@ -220,10 +325,21 @@ async function gitPr(ctx: Ctx) {
 
 	// Check for upstream, push with -u if needed
 	const upstreamCheck = await exec("git rev-parse --abbrev-ref --symbolic-full-name @{u}");
+	let pushResult: ExecResult;
 	if (upstreamCheck.code !== 0) {
-		await exec(`git push -u origin ${shQuote(branch)}`);
+		const remote = await resolvePushRemote(ctx, branch);
+		if (!remote) {
+			errorMsg(ctx, `Failed to determine which remote should receive branch '${branch}'. Configure branch.${branch}.remote, remote.pushDefault, or add a usable remote.`);
+			return;
+		}
+		pushResult = await exec(`git push -u ${shQuote(remote)} ${shQuote(branch)}`);
 	} else {
-		await exec("git push");
+		pushResult = await exec("git push");
+	}
+
+	if (pushResult.code !== 0) {
+		errorMsg(ctx, `Failed to push branch: ${pushResult.stderr}`);
+		return;
 	}
 
 	// Check if PR already exists

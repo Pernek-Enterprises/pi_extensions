@@ -195,17 +195,22 @@ test("/git-diff accepts optional path argument", async () => {
 test("/git-checkout without arguments shows an interactive branch picker via ctx.ui.select()", async () => {
 	let selectCalled = false;
 	const ctx = makeCtx();
-	ctx.execResponses.set("git branch -a", ok("  main\n  feature/foo\n  remotes/origin/feature/bar\n"));
+	ctx.execResponses.set("git branch -a", ok("  main\n  feature/foo\n  remotes/bitehive/HEAD -> bitehive/main\n  remotes/bitehive/feature/bar\n"));
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git checkout", ok("Switched to branch 'feature/foo'"));
 
-	ctx.ui.select = async (prompt: string, choices: string[]) => {
+	ctx.ui.select = async (_prompt: string, choices: string[]) => {
 		selectCalled = true;
-		// Verify remotes/origin/ prefix is stripped
 		assert.ok(
-			!choices.some((c) => c.includes("remotes/origin/")),
-			"branch picker should strip remotes/origin/ prefixes",
+			!choices.some((c) => c.includes("remotes/")),
+			"branch picker should strip the remotes/ prefix from display labels",
 		);
+		assert.ok(
+			!choices.some((c) => c.includes(" -> ")),
+			"branch picker should omit symbolic remote HEAD entries",
+		);
+		assert.ok(choices.includes("feature/foo"), "branch picker should include local branches");
+		assert.ok(choices.includes("bitehive/feature/bar"), "branch picker should preserve remote identity for remote branches");
 		return "feature/foo";
 	};
 
@@ -266,20 +271,21 @@ test("/git-create-branch creates and checks out a new branch", async () => {
 });
 
 // Requirement 7 / 19: /git-remote-main checks out main and pulls
-test("/git-remote-main checks out main and pulls from origin", async () => {
+test("/git-remote-main checks out main and pulls from the resolved remote", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("feature/something"));
+	ctx.execResponses.set("branch.main.remote", ok("bitehive"));
 	ctx.execResponses.set("git checkout main", ok("Switched to branch 'main'"));
-	ctx.execResponses.set("git pull origin main", ok("Already up to date."));
+	ctx.execResponses.set("git pull 'bitehive' main", ok("Already up to date."));
 
 	const handler = getHandler("git-remote-main", ctx);
 	await handler("", ctx);
 
 	const checkoutMain = ctx.execCalls.find((c) => c.command.includes("git checkout main"));
 	assert.ok(checkoutMain, "must checkout main");
-	const pullMain = ctx.execCalls.find((c) => c.command.includes("git pull origin main"));
-	assert.ok(pullMain, "must pull from origin main");
+	const pullMain = ctx.execCalls.find((c) => c.command.includes("git pull 'bitehive' main"));
+	assert.ok(pullMain, "must pull from the resolved remote main branch");
 });
 
 // Requirement 26: /git-remote-main prompts to stash on dirty tree
@@ -288,9 +294,10 @@ test("/git-remote-main prompts to stash on dirty working tree", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("git status --porcelain", ok(" M file.ts\n"));
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("feature/x"));
+	ctx.execResponses.set("branch.main.remote", ok("bitehive"));
 	ctx.execResponses.set("git stash", ok("Saved"));
 	ctx.execResponses.set("git checkout main", ok("Switched"));
-	ctx.execResponses.set("git pull origin main", ok("Up to date"));
+	ctx.execResponses.set("git pull 'bitehive' main", ok("Up to date"));
 	ctx.execResponses.set("git stash pop", ok("Applied"));
 
 	ctx.ui.confirm = async () => { confirmCalled = true; return true; };
@@ -306,15 +313,16 @@ test("/git-remote-main when already on main skips checkout and just pulls", asyn
 	const ctx = makeCtx();
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("main"));
-	ctx.execResponses.set("git pull origin main", ok("Already up to date."));
+	ctx.execResponses.set("branch.main.remote", ok("bitehive"));
+	ctx.execResponses.set("git pull 'bitehive' main", ok("Already up to date."));
 
 	const handler = getHandler("git-remote-main", ctx);
 	await handler("", ctx);
 
 	const checkoutCall = ctx.execCalls.find((c) => c.command.includes("git checkout main"));
 	assert.ok(!checkoutCall, "should NOT checkout main when already on main");
-	const pullCall = ctx.execCalls.find((c) => c.command.includes("git pull origin main"));
-	assert.ok(pullCall, "must still pull from origin main");
+	const pullCall = ctx.execCalls.find((c) => c.command.includes("git pull 'bitehive' main"));
+	assert.ok(pullCall, "must still pull from the resolved remote main branch");
 });
 
 // Requirement 8 / 21: /git-commit stages all and commits with message argument
@@ -379,6 +387,8 @@ test("/git-pr creates a new PR via gh pr create against main", async () => {
 	ctx.execResponses.set("gh pr view", fail("no pull requests found", 1));
 	ctx.execResponses.set("git push", ok(""));
 	ctx.execResponses.set("git rev-parse --abbrev-ref --symbolic-full-name @{u}", fail("no upstream", 128));
+	ctx.execResponses.set("branch.feature/cool.remote", ok("bitehive"));
+	ctx.execResponses.set("git push -u 'bitehive'", ok(""));
 	ctx.execResponses.set("gh pr create", ok("https://github.com/org/repo/pull/42"));
 
 	const handler = getHandler("git-pr", ctx);
@@ -430,21 +440,44 @@ test("/git-pr on main branch refuses with a helpful message", async () => {
 });
 
 // Requirement 35: /git-pr when branch has no upstream pushes with -u first
-test("/git-pr pushes with -u origin <branch> when branch has no upstream", async () => {
+test("/git-pr pushes with -u <resolved-remote> <branch> when branch has no upstream", async () => {
 	const ctx = makeCtx();
 	ctx.execResponses.set("gh auth status", ok("Logged in"));
 	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("feature/no-upstream"));
 	ctx.execResponses.set("git rev-parse --abbrev-ref --symbolic-full-name @{u}", fail("fatal: no upstream", 128));
+	ctx.execResponses.set("branch.feature/no-upstream.remote", ok("bitehive"));
 	ctx.execResponses.set("gh pr view", fail("no pull requests found", 1));
-	ctx.execResponses.set("git push -u origin", ok(""));
+	ctx.execResponses.set("git push -u 'bitehive'", ok(""));
 	ctx.execResponses.set("git push", ok(""));
 	ctx.execResponses.set("gh pr create", ok("https://github.com/org/repo/pull/99"));
 
 	const handler = getHandler("git-pr", ctx);
 	await handler("", ctx);
 
-	const pushUpstream = ctx.execCalls.find((c) => c.command.includes("git push") && c.command.includes("-u") && c.command.includes("origin"));
-	assert.ok(pushUpstream, "must push with -u origin <branch> when no upstream exists");
+	const pushUpstream = ctx.execCalls.find((c) => c.command.includes("git push") && c.command.includes("-u") && c.command.includes("'bitehive'"));
+	assert.ok(pushUpstream, "must push with -u <resolved-remote> <branch> when no upstream exists");
+});
+
+// Review fix: in origin+upstream repos, a brand-new branch without branch.<name>.remote should still push to a valid remote
+test("/git-pr defaults a new branch to origin in a multi-remote repo when no branch remote is configured", async () => {
+	const ctx = makeCtx();
+	ctx.execResponses.set("gh auth status", ok("Logged in"));
+	ctx.execResponses.set("git rev-parse --abbrev-ref HEAD", ok("feature/first-push"));
+	ctx.execResponses.set("git rev-parse --abbrev-ref --symbolic-full-name @{u}", fail("fatal: no upstream", 128));
+	ctx.execResponses.set("git remote", ok("origin\nupstream\n"));
+	ctx.execResponses.set("gh pr view", fail("no pull requests found", 1));
+	ctx.execResponses.set("git push -u 'origin' 'feature/first-push'", ok(""));
+	ctx.execResponses.set("gh pr create", ok("https://github.com/org/repo/pull/100"));
+
+	const handler = getHandler("git-pr", ctx);
+	await handler("", ctx);
+
+	const pushOrigin = ctx.execCalls.find((c) => c.command.includes("git push -u 'origin' 'feature/first-push'"));
+	assert.ok(pushOrigin, "must fall back to origin for a first push in a multi-remote repo");
+	assert.ok(
+		ctx.execCalls.some((c) => c.command.includes("gh pr create")),
+		"must continue to PR creation after pushing the new branch",
+	);
 });
 
 // Requirement 10 / 28 / Scope: `/git-pr-update` — push current branch, update existing PR (or notify if none exists)
@@ -552,11 +585,11 @@ test("stash pop conflict after checkout notifies error and leaves stash intact",
 	assert.ok(!stashDrop, "must NOT drop stash on conflict — leave it intact");
 });
 
-// Requirement 17: Branch picker strips remotes/origin/ prefixes for display
-test("branch picker strips remotes/origin/ prefixes and deduplicates branches", async () => {
+// Review fix: branch picker strips the remotes/ prefix, omits HEAD aliases, and keeps remote branches distinct
+test("branch picker strips remotes/ prefix, omits HEAD aliases, and preserves remote identity", async () => {
 	let receivedChoices: string[] = [];
 	const ctx = makeCtx();
-	ctx.execResponses.set("git branch -a", ok("  main\n  feature/x\n  remotes/origin/main\n  remotes/origin/feature/x\n  remotes/origin/feature/remote-only\n"));
+	ctx.execResponses.set("git branch -a", ok("  main\n  feature/x\n  remotes/bitehive/HEAD -> bitehive/main\n  remotes/bitehive/main\n  remotes/bitehive/feature/x\n  remotes/bitehive/feature/remote-only\n"));
 	ctx.execResponses.set("git status --porcelain", ok(""));
 	ctx.execResponses.set("git checkout", ok("Switched"));
 
@@ -571,15 +604,42 @@ test("branch picker strips remotes/origin/ prefixes and deduplicates branches", 
 	assert.ok(receivedChoices.length > 0, "must provide choices to select");
 	for (const choice of receivedChoices) {
 		assert.ok(
-			!choice.includes("remotes/origin/"),
-			`branch label should not contain 'remotes/origin/' prefix, got: ${choice}`,
+			!choice.includes("remotes/"),
+			`branch label should not contain the literal remotes/ prefix, got: ${choice}`,
+		);
+		assert.ok(
+			!choice.includes(" -> "),
+			`branch label should not contain remote HEAD alias text, got: ${choice}`,
 		);
 	}
-	// Verify deduplication: main and feature/x appear only once each
 	const mainCount = receivedChoices.filter((c) => c === "main").length;
-	assert.ok(mainCount === 1, `'main' should appear exactly once, got ${mainCount}`);
+	assert.equal(mainCount, 1, `'main' should appear exactly once, got ${mainCount}`);
 	const featureXCount = receivedChoices.filter((c) => c === "feature/x").length;
-	assert.ok(featureXCount === 1, `'feature/x' should appear exactly once, got ${featureXCount}`);
-	// remote-only should be present
-	assert.ok(receivedChoices.includes("feature/remote-only"), "remote-only branch should be included after stripping prefix");
+	assert.equal(featureXCount, 1, `'feature/x' should appear exactly once as a local branch, got ${featureXCount}`);
+	assert.ok(receivedChoices.includes("bitehive/main"), "remote main should preserve its remote name");
+	assert.ok(receivedChoices.includes("bitehive/feature/x"), "remote feature/x should preserve its remote name");
+	assert.ok(receivedChoices.includes("bitehive/feature/remote-only"), "remote-only branches should preserve their remote name");
+});
+
+// Review fix: when the same branch exists on multiple remotes, the picker must not collapse them into one ambiguous checkout target
+test("branch picker keeps same-named remote branches separate and checks out the selected remote branch unambiguously", async () => {
+	let receivedChoices: string[] = [];
+	const ctx = makeCtx();
+	ctx.execResponses.set("git branch -a", ok("  main\n  remotes/origin/feature/foo\n  remotes/upstream/feature/foo\n"));
+	ctx.execResponses.set("git status --porcelain", ok(""));
+	ctx.execResponses.set("git checkout --track 'origin/feature/foo'", ok("branch 'feature/foo' set up to track 'origin/feature/foo'"));
+
+	ctx.ui.select = async (_prompt: string, choices: string[]) => {
+		receivedChoices = choices;
+		return "origin/feature/foo";
+	};
+
+	const handler = getHandler("git-checkout", ctx);
+	await handler("", ctx);
+
+	assert.deepEqual(receivedChoices, ["main", "origin/feature/foo", "upstream/feature/foo"], "picker should keep both remote branches visible and distinct");
+	assert.ok(
+		ctx.execCalls.some((c) => c.command.includes("git checkout --track 'origin/feature/foo'")),
+		"must checkout the selected remote branch with an unambiguous target",
+	);
 });
